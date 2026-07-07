@@ -16,6 +16,8 @@
 
 English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [Changelog](CHANGELOG.md)
 
+Fork note: [Codex provider snapshot requirements](docs/guides/codex-provider-snapshot-requirements.md)
+
 </div>
 
 ## ❤️Sponsor
