@@ -5,6 +5,7 @@
 mod endpoints;
 mod gemini_auth;
 mod live;
+mod post_switch;
 mod usage;
 
 use indexmap::IndexMap;
@@ -3144,6 +3145,9 @@ impl ProviderService {
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
         write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        if let Some(warning) = post_switch::run_after_switch(&app_type) {
+            result.warnings.push(warning);
+        }
 
         // A material-less official Codex provider gets a config-only live
         // write, which can leave the previous third-party key in
