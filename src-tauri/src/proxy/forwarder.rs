@@ -13,7 +13,13 @@ use super::{
     provider_router::ProviderRouter,
     providers::{
         codex_chat_history::CodexChatHistoryStore,
-        codex_portable_handoff::sanitize_codex_handoff_request,
+        codex_portable_handoff::{
+            contains_portable_transcript, inject_portable_transcript, needs_portable_transcript,
+            sanitize_codex_handoff_request,
+        },
+        codex_rollout_transcript::{
+            read_visible_transcript, RolloutTranscriptError, VisibleTranscript,
+        },
         codex_route_state::{CodexRouteAttempt, CodexRouteState},
         gemini_shadow::GeminiShadowStore,
         get_adapter, AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
@@ -253,24 +259,43 @@ impl RequestForwarder {
         endpoint: &str,
         provider: &Provider,
         body: Value,
-    ) -> (Value, Option<CodexRouteAttempt>) {
+    ) -> Result<(Value, Option<CodexRouteAttempt>), ProxyError> {
         let path = endpoint.split('?').next().unwrap_or(endpoint);
         if !matches!(app_type, AppType::Codex)
             || !matches!(path, "/responses" | "/responses/compact")
             || !self.session_client_provided
         {
-            return (body, None);
+            return Ok((body, None));
         }
 
         let attempt = self
             .codex_route_state
             .begin_attempt(self.session_id.clone(), provider.id.clone());
         let body = if attempt.is_provider_change() {
-            sanitize_codex_handoff_request(&body, true).into_owned()
+            self.portable_codex_body_with_reader(body, read_visible_transcript)?
         } else {
             body
         };
-        (body, Some(attempt))
+        Ok((body, Some(attempt)))
+    }
+
+    fn portable_codex_body_with_reader<R>(
+        &self,
+        body: Value,
+        transcript_reader: R,
+    ) -> Result<Value, ProxyError>
+    where
+        R: FnOnce(&str) -> Result<VisibleTranscript, RolloutTranscriptError>,
+    {
+        let sanitized = sanitize_codex_handoff_request(&body, true).into_owned();
+        if !needs_portable_transcript(&body, &sanitized) {
+            return Ok(sanitized);
+        }
+
+        let transcript = transcript_reader(&self.session_id)
+            .map_err(|_| ProxyError::PortableHandoffUnavailable)?;
+        inject_portable_transcript(sanitized, transcript)
+            .map_err(|_| ProxyError::PortableHandoffUnavailable)
     }
 
     async fn record_success_result(
@@ -495,8 +520,20 @@ impl RequestForwarder {
             } else {
                 body.clone()
             };
-            let (mut provider_body, mut codex_route_attempt) =
-                self.prepare_codex_handoff_attempt(app_type, endpoint, provider, provider_body);
+            let (mut provider_body, mut codex_route_attempt) = match self
+                .prepare_codex_handoff_attempt(app_type, endpoint, provider, provider_body)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.router
+                        .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+                        .await;
+                    return Err(ForwardError {
+                        error,
+                        provider: Some(provider.clone()),
+                    });
+                }
+            };
 
             attempted_providers += 1;
 
@@ -1162,6 +1199,8 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        let omit_body_from_debug_log = contains_portable_transcript(body);
+
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
@@ -2222,11 +2261,21 @@ impl RequestForwarder {
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
         log::info!("[{tag}] >>> 请求目标: {target_for_log} (model={request_model})");
-        log::debug!(
-            "[{tag}] >>> 请求体已准备: bytes={}, hash={} (content omitted)",
-            body_bytes.len(),
-            short_value_hash(Some(&filtered_body))
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            if omit_body_from_debug_log {
+                log::debug!(
+                    "[{tag}] >>> 请求体内容已省略 (portable handoff; bytes={}, hash={})",
+                    body_bytes.len(),
+                    short_value_hash(Some(&filtered_body))
+                );
+            } else {
+                log::debug!(
+                    "[{tag}] >>> 请求体已准备: bytes={}, hash={} (content omitted)",
+                    body_bytes.len(),
+                    short_value_hash(Some(&filtered_body))
+                );
+            }
+        }
 
         // 确定超时
         let timeout = if self.non_streaming_timeout.is_zero() {
@@ -3609,6 +3658,9 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::provider::LocalProxyRequestOverrides;
+    use crate::proxy::providers::codex_rollout_transcript::{
+        VisibleContent, VisibleRole, VisibleTranscriptEntry,
+    };
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
@@ -4013,30 +4065,35 @@ mod tests {
             "model": "gpt-test",
             "previous_response_id": "resp_provider_a",
             "input": [
-                {"type": "message", "id": "msg_provider_a", "role": "user", "content": "hello"}
+                {"type": "message", "id": "msg_provider_a", "role": "user", "content": "hello"},
+                {"type": "message", "id": "msg_provider_a_reply", "role": "assistant", "content": "hi"}
             ]
         });
 
         let mut provider_b = provider_a.clone();
         provider_b.id = "provider-b".to_string();
-        let (body_for_b, attempt_b) = forwarder.prepare_codex_handoff_attempt(
-            &AppType::Codex,
-            "/responses",
-            &provider_b,
-            original.clone(),
-        );
+        let (body_for_b, attempt_b) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_b,
+                original.clone(),
+            )
+            .expect("prepare provider B");
         assert!(body_for_b.get("previous_response_id").is_none());
         assert!(body_for_b["input"][0].get("id").is_none());
         drop(attempt_b);
 
         let mut provider_c = provider_a.clone();
         provider_c.id = "provider-c".to_string();
-        let (body_for_c, attempt_c) = forwarder.prepare_codex_handoff_attempt(
-            &AppType::Codex,
-            "/responses",
-            &provider_c,
-            original.clone(),
-        );
+        let (body_for_c, attempt_c) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_c,
+                original.clone(),
+            )
+            .expect("prepare provider C");
         assert!(body_for_c.get("previous_response_id").is_none());
         assert!(body_for_c["input"][0].get("id").is_none());
         drop(attempt_c);
@@ -4056,25 +4113,149 @@ mod tests {
             .complete_successfully();
 
         let original = json!({"previous_response_id": "resp_provider_a", "input": []});
-        let (same_provider_body, same_provider_attempt) = forwarder.prepare_codex_handoff_attempt(
-            &AppType::Codex,
-            "/responses",
-            &provider_a,
-            original.clone(),
-        );
+        let (same_provider_body, same_provider_attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_a,
+                original.clone(),
+            )
+            .expect("prepare same provider");
         assert_eq!(same_provider_body, original);
         drop(same_provider_attempt);
 
         let mut provider_b = provider_a.clone();
         provider_b.id = "provider-b".to_string();
-        let (chat_body, chat_attempt) = forwarder.prepare_codex_handoff_attempt(
-            &AppType::Codex,
-            "/chat/completions",
-            &provider_b,
-            original.clone(),
-        );
+        let (chat_body, chat_attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/chat/completions",
+                &provider_b,
+                original.clone(),
+            )
+            .expect("prepare chat request");
         assert_eq!(chat_body, original);
         assert!(chat_attempt.is_none());
+    }
+
+    #[test]
+    fn compacted_provider_handoff_injects_visible_transcript_as_text() {
+        const SESSION_ID: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b18";
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = SESSION_ID.to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_a.id)
+            .complete_successfully();
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+
+        let original = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "compaction", "id": "cmp_a", "encrypted_content": "opaque"},
+                {"type": "message", "role": "user", "content": "current unique input"}
+            ]
+        });
+        let transcript = VisibleTranscript {
+            entries: vec![
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier request".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::Assistant,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier answer".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::ToolResult {
+                    call_id: "call_history".to_string(),
+                    output: "historical tool output".to_string(),
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "current unique input".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let attempt = forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_b.id);
+        assert!(attempt.is_provider_change());
+        let body = forwarder
+            .portable_codex_body_with_reader(original, |session_id| {
+                assert_eq!(session_id, SESSION_ID);
+                Ok(transcript)
+            })
+            .expect("prepare compacted handoff");
+
+        assert!(body.get("previous_response_id").is_none());
+        assert!(!body.to_string().contains("opaque"));
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        let context_text = input[0]["content"][0]["text"]
+            .as_str()
+            .expect("context text");
+        assert!(context_text.contains("--- BEGIN PORTABLE VISIBLE TRANSCRIPT ---"));
+        assert!(context_text.contains("earlier request"));
+        assert!(context_text.contains("earlier answer"));
+        assert!(context_text.contains("historical tool output"));
+        assert!(!context_text.contains("current unique input"));
+        assert_eq!(body.to_string().matches("current unique input").count(), 1);
+        assert!(input
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("function_call")));
+        drop(attempt);
+    }
+
+    #[test]
+    fn compacted_handoff_fails_closed_when_transcript_is_missing() {
+        const SESSION_ID: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b18";
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = SESSION_ID.to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_a.id)
+            .complete_successfully();
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let original = json!({
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "compaction", "encrypted_content": "opaque"},
+                {"type": "message", "role": "user", "content": "continue"}
+            ]
+        });
+
+        let attempt = forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_b.id);
+        assert!(attempt.is_provider_change());
+        let error = forwarder
+            .portable_codex_body_with_reader(original, |session_id| {
+                Err(RolloutTranscriptError::Missing {
+                    session_id: session_id.to_string(),
+                })
+            })
+            .expect_err("missing transcript must fail closed");
+
+        assert!(matches!(error, ProxyError::PortableHandoffUnavailable));
+        drop(attempt);
     }
 
     #[test]

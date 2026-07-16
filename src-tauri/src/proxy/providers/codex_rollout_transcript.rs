@@ -60,6 +60,35 @@ pub(crate) enum VisibleContent {
     Attachment { attachment: AttachmentReference },
 }
 
+pub(crate) fn normalize_visible_content(value: &Value) -> Option<Vec<VisibleContent>> {
+    let content: Vec<VisibleContent> = match value {
+        Value::String(text) => nonempty_text(text).into_iter().collect(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(normalize_visible_content_item)
+            .collect(),
+        _ => return None,
+    };
+    (!content.is_empty()).then_some(content)
+}
+
+fn normalize_visible_content_item(item: &Value) -> Option<VisibleContent> {
+    let object = item.as_object()?;
+    if object.contains_key("encrypted_content") {
+        return None;
+    }
+    match object.get("type").and_then(Value::as_str) {
+        Some("input_text" | "output_text" | "text") => object
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(nonempty_text),
+        Some("input_image" | "image" | "image_url" | "input_file" | "file" | "attachment") => {
+            extract_attachment(object).map(|attachment| VisibleContent::Attachment { attachment })
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AttachmentReference {
     pub kind: String,

@@ -45,6 +45,9 @@ pub enum ProxyError {
     #[error("超过最大重试次数")]
     MaxRetriesExceeded,
 
+    #[error("portable_handoff_unavailable")]
+    PortableHandoffUnavailable,
+
     #[error("数据库错误: {0}")]
     DatabaseError(String),
 
@@ -138,6 +141,9 @@ impl IntoResponse for ProxyError {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
                     ProxyError::MaxRetriesExceeded => {
+                        (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+                    }
+                    ProxyError::PortableHandoffUnavailable => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
                     ProxyError::DatabaseError(_) => {

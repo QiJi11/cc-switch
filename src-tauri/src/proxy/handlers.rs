@@ -1893,6 +1893,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::AllProvidersCircuitOpen => "cc_switch_all_providers_circuit_open",
         ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",
         ProxyError::MaxRetriesExceeded => "cc_switch_max_retries_exceeded",
+        ProxyError::PortableHandoffUnavailable => "portable_handoff_unavailable",
         ProxyError::ProviderUnhealthy(_) => "cc_switch_provider_unhealthy",
         ProxyError::ConfigError(_) => "cc_switch_config_error",
         ProxyError::TransformError(_) => "cc_switch_transform_error",
@@ -3297,6 +3298,18 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
         assert_eq!(body["error"]["provider"], "DeepSeek");
         assert_eq!(body["error"]["model"], "deepseek-chat");
+    }
+
+    #[test]
+    fn codex_proxy_portable_handoff_error_has_stable_code() {
+        let body = codex_proxy_error_json(
+            "Provider B",
+            "gpt-test",
+            "/responses",
+            &ProxyError::PortableHandoffUnavailable,
+        );
+
+        assert_eq!(body["error"]["code"], "portable_handoff_unavailable");
     }
 
     #[test]

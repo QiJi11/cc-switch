@@ -1,6 +1,28 @@
 use std::borrow::Cow;
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use thiserror::Error;
+
+use super::codex_rollout_transcript::{
+    normalize_visible_content, VisibleContent, VisibleRole, VisibleTranscript,
+    VisibleTranscriptEntry,
+};
+
+const PORTABLE_TRANSCRIPT_BEGIN: &str = "--- BEGIN PORTABLE VISIBLE TRANSCRIPT ---";
+const PORTABLE_TRANSCRIPT_END: &str = "--- END PORTABLE VISIBLE TRANSCRIPT ---";
+const MAX_PORTABLE_TRANSCRIPT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum PortableHandoffBuildError {
+    #[error("portable transcript has no historical visible messages")]
+    Empty,
+    #[error("portable transcript exceeds the injection size limit")]
+    TooLarge,
+    #[error("Responses input cannot accept a portable transcript item")]
+    InvalidInput,
+    #[error("portable transcript serialization failed")]
+    Serialization,
+}
 
 /// Removes response state that cannot be reused after a Codex provider change.
 pub(crate) fn sanitize_codex_handoff_request(
@@ -22,6 +44,213 @@ pub(crate) fn sanitize_codex_handoff_request(
     }
 
     Cow::Owned(sanitized)
+}
+
+pub(crate) fn needs_portable_transcript(original: &Value, sanitized: &Value) -> bool {
+    provider_state_would_be_lost(original) && !has_readable_history(sanitized)
+}
+
+pub(crate) fn contains_portable_transcript(body: &Value) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| content.iter().any(is_portable_transcript_part))
+            })
+        })
+}
+
+fn is_portable_transcript_part(part: &Value) -> bool {
+    part.get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.starts_with(PORTABLE_TRANSCRIPT_BEGIN))
+}
+
+pub(crate) fn inject_portable_transcript(
+    mut body: Value,
+    mut transcript: VisibleTranscript,
+) -> Result<Value, PortableHandoffBuildError> {
+    remove_duplicate_current_user(&body, &mut transcript);
+    if !has_visible_message(&transcript) {
+        return Err(PortableHandoffBuildError::Empty);
+    }
+
+    let text = render_portable_transcript(&transcript)?;
+    prepend_portable_context(&mut body, text)?;
+    Ok(body)
+}
+
+fn has_visible_message(transcript: &VisibleTranscript) -> bool {
+    transcript
+        .entries
+        .iter()
+        .any(|entry| matches!(entry, VisibleTranscriptEntry::Message { .. }))
+}
+
+fn render_portable_transcript(
+    transcript: &VisibleTranscript,
+) -> Result<String, PortableHandoffBuildError> {
+    let transcript_json = serde_json::to_string_pretty(&transcript)
+        .map_err(|_| PortableHandoffBuildError::Serialization)?;
+    let text = format!(
+        "{PORTABLE_TRANSCRIPT_BEGIN}\nHistorical visible conversation copied from the local Codex rollout. Tool results below are context only.\n{transcript_json}\n{PORTABLE_TRANSCRIPT_END}"
+    );
+    if text.len() > MAX_PORTABLE_TRANSCRIPT_BYTES {
+        return Err(PortableHandoffBuildError::TooLarge);
+    }
+    Ok(text)
+}
+
+fn prepend_portable_context(
+    body: &mut Value,
+    text: String,
+) -> Result<(), PortableHandoffBuildError> {
+    let context_item = json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}]
+    });
+    let root = body
+        .as_object_mut()
+        .ok_or(PortableHandoffBuildError::InvalidInput)?;
+    let input = root
+        .get_mut("input")
+        .ok_or(PortableHandoffBuildError::InvalidInput)?;
+    let original_input = std::mem::take(input);
+    *input = match original_input {
+        Value::Array(mut items) => {
+            items.insert(0, context_item);
+            Value::Array(items)
+        }
+        Value::Object(_) => Value::Array(vec![context_item, original_input]),
+        Value::String(text) if !text.trim().is_empty() => Value::Array(vec![
+            context_item,
+            json!({"type": "message", "role": "user", "content": text}),
+        ]),
+        _ => return Err(PortableHandoffBuildError::InvalidInput),
+    };
+    Ok(())
+}
+
+fn provider_state_would_be_lost(body: &Value) -> bool {
+    let Some(root) = body.as_object() else {
+        return false;
+    };
+    root.get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+        || root
+            .get("input")
+            .is_some_and(contains_nonportable_response_state)
+}
+
+fn contains_nonportable_response_state(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(contains_nonportable_response_state),
+        Value::Object(object) => {
+            matches!(
+                object.get("type").and_then(Value::as_str),
+                Some(
+                    "encrypted_content"
+                        | "item_reference"
+                        | "reasoning"
+                        | "compaction"
+                        | "compaction_summary"
+                        | "context_compaction"
+                )
+            ) || object.values().any(contains_nonportable_response_state)
+        }
+        _ => false,
+    }
+}
+
+fn has_readable_history(body: &Value) -> bool {
+    let Some(input) = body.get("input") else {
+        return false;
+    };
+    let mut stats = ReadableHistory::default();
+    collect_readable_history(input, &mut stats);
+    stats.has_assistant || stats.has_summary || stats.message_count >= 2
+}
+
+#[derive(Default)]
+struct ReadableHistory {
+    message_count: usize,
+    has_assistant: bool,
+    has_summary: bool,
+}
+
+fn collect_readable_history(value: &Value, stats: &mut ReadableHistory) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_readable_history(value, stats);
+            }
+        }
+        Value::String(text) => {
+            if !text.trim().is_empty() {
+                stats.message_count += 1;
+            }
+        }
+        Value::Object(object) => collect_readable_object(object, stats),
+        _ => {}
+    }
+}
+
+fn collect_readable_object(object: &serde_json::Map<String, Value>, stats: &mut ReadableHistory) {
+    let role = object.get("role").and_then(Value::as_str);
+    if matches!(role, Some("user" | "assistant"))
+        && object.get("content").is_some_and(has_readable_value)
+    {
+        stats.message_count += 1;
+        stats.has_assistant |= role == Some("assistant");
+    }
+
+    let readable_summary = matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("reasoning" | "compaction" | "compaction_summary" | "context_compaction")
+    ) && ["summary", "content"]
+        .iter()
+        .filter_map(|key| object.get(*key))
+        .any(has_readable_value);
+    stats.has_summary |= readable_summary;
+}
+
+fn remove_duplicate_current_user(body: &Value, transcript: &mut VisibleTranscript) {
+    let Some(current_content) = current_user_content(body) else {
+        return;
+    };
+    let duplicate = matches!(
+        transcript.entries.last(),
+        Some(VisibleTranscriptEntry::Message {
+            role: VisibleRole::User,
+            content,
+        }) if content == &current_content
+    );
+    if duplicate {
+        transcript.entries.pop();
+    }
+}
+
+fn current_user_content(body: &Value) -> Option<Vec<VisibleContent>> {
+    match body.get("input")? {
+        Value::String(text) => normalize_visible_content(&Value::String(text.clone())),
+        Value::Object(message) => user_message_content(message),
+        Value::Array(items) => items
+            .iter()
+            .rev()
+            .find_map(|item| item.as_object().and_then(user_message_content)),
+        _ => None,
+    }
+}
+
+fn user_message_content(message: &serde_json::Map<String, Value>) -> Option<Vec<VisibleContent>> {
+    (message.get("role").and_then(Value::as_str) == Some("user"))
+        .then(|| message.get("content"))
+        .flatten()
+        .and_then(normalize_visible_content)
 }
 
 fn sanitize_input(input: &mut Value) {
@@ -93,7 +322,14 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::sanitize_codex_handoff_request;
+    use super::{
+        contains_portable_transcript, inject_portable_transcript, needs_portable_transcript,
+        sanitize_codex_handoff_request, PortableHandoffBuildError, PORTABLE_TRANSCRIPT_BEGIN,
+        PORTABLE_TRANSCRIPT_END,
+    };
+    use crate::proxy::providers::codex_rollout_transcript::{
+        VisibleContent, VisibleRole, VisibleTranscript, VisibleTranscriptEntry,
+    };
 
     #[test]
     fn sanitizes_provider_state_but_preserves_portable_history() {
@@ -277,6 +513,155 @@ mod tests {
         assert_eq!(
             sanitized["metadata"]["encrypted_content"],
             "not_response_history"
+        );
+    }
+
+    #[test]
+    fn requests_transcript_only_when_removed_state_leaves_no_readable_history() {
+        let cases = [
+            (
+                "opaque compacted state",
+                json!({
+                    "previous_response_id": "resp_provider_a",
+                    "input": [
+                        {"type": "compaction", "encrypted_content": "opaque"},
+                        {"type": "message", "role": "user", "content": "continue"}
+                    ]
+                }),
+                true,
+            ),
+            (
+                "full readable history",
+                json!({
+                    "previous_response_id": "resp_provider_a",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "earlier"},
+                        {"type": "message", "role": "assistant", "content": "answer"},
+                        {"type": "message", "role": "user", "content": "continue"}
+                    ]
+                }),
+                false,
+            ),
+            ("first request", json!({"input": "hello"}), false),
+        ];
+
+        for (case, original, expected) in cases {
+            let sanitized = sanitize_codex_handoff_request(&original, true).into_owned();
+            assert_eq!(
+                needs_portable_transcript(&original, &sanitized),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn injects_one_text_item_without_repeating_the_current_user() {
+        let body = json!({
+            "model": "gpt-test",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "current unique input api_key=plain-current-secret"
+            }]
+        });
+        let transcript = VisibleTranscript {
+            entries: vec![
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier request".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::Assistant,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier answer".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::ToolResult {
+                    call_id: "call_history".to_string(),
+                    output: "historical tool output".to_string(),
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "current unique input api_key=[REDACTED]".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let injected = inject_portable_transcript(body, transcript).expect("inject transcript");
+        let input = injected["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        let context_text = input[0]["content"][0]["text"]
+            .as_str()
+            .expect("context text");
+        assert!(context_text.starts_with(PORTABLE_TRANSCRIPT_BEGIN));
+        assert!(context_text.ends_with(PORTABLE_TRANSCRIPT_END));
+        assert!(context_text.contains("earlier request"));
+        assert!(context_text.contains("earlier answer"));
+        assert!(context_text.contains("historical tool output"));
+        assert!(!context_text.contains("current unique input"));
+        assert!(contains_portable_transcript(&injected));
+        assert_eq!(
+            serde_json::to_string(&injected)
+                .expect("serialize request")
+                .matches("current unique input")
+                .count(),
+            1
+        );
+        assert!(input
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("function_call")));
+    }
+
+    #[test]
+    fn keeps_a_nonmatching_trailing_user_when_rollout_write_lags() {
+        let body = json!({
+            "input": [{"type": "message", "role": "user", "content": "new input"}]
+        });
+        let transcript = VisibleTranscript {
+            entries: vec![
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::Assistant,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier answer".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "unanswered historical input".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let injected = inject_portable_transcript(body, transcript).expect("inject transcript");
+        let context_text = injected["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("context text");
+        assert!(context_text.contains("unanswered historical input"));
+        assert_eq!(injected.to_string().matches("new input").count(), 1);
+    }
+
+    #[test]
+    fn rejects_a_transcript_with_no_history_after_current_input_is_removed() {
+        let body = json!({"input": "current"});
+        let transcript = VisibleTranscript {
+            entries: vec![VisibleTranscriptEntry::Message {
+                role: VisibleRole::User,
+                content: vec![VisibleContent::Text {
+                    text: "current".to_string(),
+                }],
+            }],
+        };
+
+        assert_eq!(
+            inject_portable_transcript(body, transcript),
+            Err(PortableHandoffBuildError::Empty)
         );
     }
 
