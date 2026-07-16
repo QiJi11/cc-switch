@@ -199,6 +199,9 @@ impl RequestContext {
     /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
     /// - 故障转移关闭：超时配置不生效（全部传入 0）
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
+        // Read this per request so saving the UI setting takes effect without restarting the proxy.
+        let codex_portable_handoff_on_provider_change =
+            crate::settings::get_settings().codex_portable_handoff_on_provider_change;
         let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
             if self.app_config.auto_failover_enabled {
                 // 故障转移开启：使用配置的值（0 = 禁用超时）
@@ -236,6 +239,7 @@ impl RequestContext {
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
+            codex_portable_handoff_on_provider_change,
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),
