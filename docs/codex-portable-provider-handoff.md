@@ -48,6 +48,7 @@
 - Rust：库测试 `1785 passed / 2 ignored / 0 failed`，其余集成测试目标全部通过；包含 proxy、failover、settings、provider service 和 Codex history migration 覆盖。
 - 三供应商本地 HTTP fixture：`959` 个 proxy 测试通过，无外部模型请求。
 - Production：Vite 和 Rust release 构建通过，生成 `src-tauri\target\release\cc-switch.exe`；NSIS 安装包已生成。默认全 bundle 命令的 MSI 阶段因下载 WiX 超时而失败，因此本次只把 NSIS 作为已验证的 Windows 安装产物。
+- 最终 Windows 产物（包含运行时开关接线）：EXE SHA-256 `19CD90583CEBED6A1F70A2B392E5B039663559487FEAF5A35DB4CAE88ADAD138`；NSIS SHA-256 `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`。
 
 ## 回滚
 

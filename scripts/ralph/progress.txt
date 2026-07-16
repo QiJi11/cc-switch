@@ -417,3 +417,34 @@ Started: 2026-07-17T02:40:00+08:00
   - The setting controls only local visible-transcript reconstruction; provider-specific state removal is a non-optional safety boundary.
   - Snapshot settings when constructing each request forwarder so persisted UI changes apply on the next request while a single request remains internally consistent.
 ---
+
+## 2026-07-17 07:52 +08:00 - US-006-ST-002
+- Story: US-006 - Wire the handoff toggle and refresh release artifacts
+- What was implemented
+  - Clarified that disabling portable handoff skips rollout reconstruction but keeps provider-state sanitization.
+  - Rebuilt and deployed the final custom-protocol Windows executable containing the runtime setting fix.
+  - Configured Codex takeover and automatic failover with priority `630刀 codex拼车2` → `800刀 codex拼车1` → `BLA codex3 0.165 pro`.
+- Files changed
+  - `docs/codex-portable-provider-handoff.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - `cargo test --manifest-path .\src-tauri\Cargo.toml --lib proxy::`: passed, 960 passed / 0 failed.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - Final EXE: SHA-256 `19CD90583CEBED6A1F70A2B392E5B039663559487FEAF5A35DB4CAE88ADAD138`.
+  - Final NSIS installer: SHA-256 `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`.
+  - `clean-code-guard`: clean.
+  - `test-guard`: clean.
+  - No paid provider request was sent.
+- Browser verification result: the CC Switch WebView showed the portable handoff toggle enabled; local routing and Codex takeover enabled; the configured failover order persisted after a normal restart.
+- Final deliverables:
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\docs\codex-portable-provider-handoff.md
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\cc-switch.exe
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\bundle\nsis\CC Switch_3.16.5_x64-setup.exe
+- **Learnings for future iterations:**
+  - Tauri custom-protocol production builds may relink after a direct Cargo release; deploy only the final custom-protocol artifact.
+  - Failover queue priority follows provider `sort_index`, not insertion order.
+  - Verify the persisted current provider after an application restart instead of inferring it from the enabled failover toggle.
+---
