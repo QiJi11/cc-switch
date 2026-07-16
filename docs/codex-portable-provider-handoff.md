@@ -6,8 +6,8 @@
 
 - 设置项 `codexPortableHandoffOnProviderChange` 默认开启，也可在“设置 → 通用 → Codex 应用增强 → 跨供应商切换时保留可见上下文”中关闭。
 - 供应商发生变化时，代理删除旧供应商的 `previous_response_id`、响应项 ID、`encrypted_content` 和不可移植的推理/压缩状态。
-- 可见用户与助手消息、附件引用、已完成的工具结果会保留。历史工具调用只作为文本上下文，不会再次执行。
-- 如果已压缩的对话无法从当前 Codex rollout 安全重建，代理返回 HTTP 503，错误码为 `portable_handoff_unavailable`，不会带残缺上下文请求新供应商。
+- 开关开启时，可见用户与助手消息、附件引用、已完成的工具结果会保留。历史工具调用只作为文本上下文，不会再次执行；如果已压缩的对话无法从当前 Codex rollout 安全重建，代理返回 HTTP 503，错误码为 `portable_handoff_unavailable`，不会带残缺上下文请求新供应商。
+- 开关关闭时，代理不读取本地 rollout，也不注入可移植 transcript；完成上述安全清洗后继续请求。早期已压缩的可见上下文可能丢失，但旧供应商的响应 ID、加密状态和不可移植推理状态仍不会转发。
 - 只有完整响应成功后才更新该 session 的供应商归属。已向客户端输出部分内容或工具指令后，不会跨供应商重试。
 
 ## 部署前检查
@@ -40,8 +40,9 @@
 3. 再执行 B → C 手动切换，确认可见历史、附件引用和已完成工具结果仍可用。
 4. 检查 CC Switch 日志：不得出现 API Key、Access Token、完整可移植 transcript 或 `encrypted_content`。
 5. 对无法安全读取 rollout 的压缩会话，确认返回 `portable_handoff_unavailable`，并且没有请求到新上游。
+6. 关闭“跨供应商切换时保留可见上下文”后再次切换，确认请求经过安全清洗后继续，不读取 rollout、不出现 portable transcript marker；此模式允许早期压缩上下文缺失。
 
-当前仓库验证结果：
+当前仓库验证结果以本轮发布复验记录为准：
 
 - TypeScript：项目内 `tsc --noEmit` 通过。
 - Rust：库测试 `1785 passed / 2 ignored / 0 failed`，其余集成测试目标全部通过；包含 proxy、failover、settings、provider service 和 Codex history migration 覆盖。
