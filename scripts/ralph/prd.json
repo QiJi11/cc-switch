@@ -209,8 +209,8 @@
             "Serialization and settings merge tests pass"
           ],
           "priority": 6,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added a backward-compatible default-on portable handoff setting across Rust and TypeScript schemas, with explicit-false preservation and form merge coverage.",
           "dependsOn": [
             "US-003-ST-002"
           ],
