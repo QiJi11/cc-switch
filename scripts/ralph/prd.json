@@ -338,8 +338,8 @@
       "title": "Wire the handoff toggle and refresh release artifacts",
       "description": "As the operator, I need the portable handoff setting to control runtime transcript reconstruction while provider-bound state remains safely sanitized.",
       "priority": 10,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "The runtime setting is wired per request, full proxy and TypeScript checks pass, and refreshed Windows EXE/NSIS artifacts were generated with recorded SHA-256 values.",
       "subtasks": [
         {
           "id": "US-006-ST-001",
@@ -387,8 +387,8 @@
             "MSI remains explicitly unverified if WiX is unavailable"
           ],
           "priority": 11,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Updated deployment semantics, passed TypeScript/proxy/format/diff checks, regenerated the Windows release and NSIS bundle, and recorded SHA-256 values. MSI remains unverified because WiX was unavailable.",
           "dependsOn": [
             "US-006-ST-001"
           ],
