@@ -124,6 +124,9 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    /// Whether provider changes may reconstruct visible context from the local Codex rollout.
+    /// Provider-bound state is sanitized regardless of this setting.
+    codex_portable_handoff_on_provider_change: bool,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -202,6 +205,7 @@ impl RequestForwarder {
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
+        codex_portable_handoff_on_provider_change: bool,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
@@ -224,6 +228,7 @@ impl RequestForwarder {
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            codex_portable_handoff_on_provider_change,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -270,6 +275,9 @@ impl RequestForwarder {
         R: FnOnce(&str) -> Result<VisibleTranscript, RolloutTranscriptError>,
     {
         let sanitized = sanitize_codex_handoff_request(&body, true).into_owned();
+        if !self.codex_portable_handoff_on_provider_change {
+            return Ok(sanitized);
+        }
         if !needs_portable_transcript(&body, &sanitized) {
             return Ok(sanitized);
         }
@@ -2922,6 +2930,7 @@ mod tests {
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            codex_portable_handoff_on_provider_change: true,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -3484,6 +3493,60 @@ mod tests {
 
         assert!(matches!(error, ProxyError::PortableHandoffUnavailable));
         drop(attempt);
+    }
+
+    #[test]
+    fn disabled_portable_handoff_skips_rollout_but_still_sanitizes_provider_state() {
+        use std::cell::Cell;
+
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "019cc369-bd7c-7891-b371-7b20b4fe0b18".to_string();
+        forwarder.session_client_provided = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+
+        let reader_called = Cell::new(false);
+        let body = forwarder
+            .portable_codex_body_with_reader(
+                json!({
+                    "model": "gpt-test",
+                    "previous_response_id": "resp_provider_a",
+                    "input": [
+                        {
+                            "type": "compaction",
+                            "id": "cmp_provider_a",
+                            "encrypted_content": "opaque-compaction"
+                        },
+                        {
+                            "type": "reasoning",
+                            "id": "reasoning_provider_a",
+                            "encrypted_content": "opaque-reasoning"
+                        },
+                        {
+                            "type": "message",
+                            "id": "msg_provider_a",
+                            "role": "user",
+                            "content": "continue safely"
+                        }
+                    ]
+                }),
+                |_| {
+                    reader_called.set(true);
+                    Ok(VisibleTranscript { entries: vec![] })
+                },
+            )
+            .expect("disabled portable handoff should continue with sanitized input");
+
+        assert!(!reader_called.get(), "rollout reader must not be called");
+        assert!(body.get("previous_response_id").is_none());
+        assert!(!body.to_string().contains("resp_provider_a"));
+        assert!(!body.to_string().contains("opaque-compaction"));
+        assert!(!body.to_string().contains("opaque-reasoning"));
+        assert!(!body
+            .to_string()
+            .contains("--- BEGIN PORTABLE VISIBLE TRANSCRIPT ---"));
+        assert_eq!(body["input"].as_array().expect("input array").len(), 1);
+        assert_eq!(body["input"][0]["content"], "continue safely");
+        assert!(body["input"][0].get("id").is_none());
     }
 
     #[test]

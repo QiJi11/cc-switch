@@ -332,7 +332,82 @@
           "sourceStoryId": "US-005"
         }
       ]
+    },
+    {
+      "id": "US-006",
+      "title": "Wire the handoff toggle and refresh release artifacts",
+      "description": "As the operator, I need the portable handoff setting to control runtime transcript reconstruction while provider-bound state remains safely sanitized.",
+      "priority": 10,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-006-ST-001",
+          "title": "Apply the portable handoff toggle at request time",
+          "description": "Read the latest setting for each forwarder and use it to control only local transcript reconstruction, never provider-boundary sanitization.",
+          "acceptanceCriteria": [
+            "Each newly created RequestForwarder receives the latest codexPortableHandoffOnProviderChange setting without requiring a proxy restart",
+            "Provider changes always remove previous_response_id, provider-scoped response ids, encrypted_content, and non-portable reasoning or compaction state",
+            "When enabled, the existing rollout transcript fallback and portable_handoff_unavailable behavior remain unchanged",
+            "When disabled, rollout reading and portable transcript injection are skipped while the sanitized request continues",
+            "Focused tests prove the disabled path does not call the transcript reader, does not add the portable marker, and still removes provider-bound state",
+            "Existing enabled, missing-rollout, failover, tool-deduplication, and log-secrecy tests remain green"
+          ],
+          "priority": 10,
+          "passes": true,
+          "notes": "Each RequestForwarder now snapshots the latest persisted portable-handoff setting. Provider changes always sanitize provider-bound state; disabling the setting skips rollout reads and transcript injection while continuing with the sanitized body. Focused and full proxy regressions pass.",
+          "dependsOn": [
+            "US-005-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/handler_context.rs",
+            "src-tauri/src/proxy/tests/codex_portable_handoff.rs"
+          ],
+          "touches": [
+            "proxy/codex-request-transform",
+            "settings/runtime"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-006"
+        },
+        {
+          "id": "US-006-ST-002",
+          "title": "Revalidate and rebuild the Windows release",
+          "description": "Update deployment semantics and regenerate verified release artifacts after the runtime toggle fix.",
+          "acceptanceCriteria": [
+            "Deployment documentation states that disabling the setting keeps safety sanitization but skips local transcript reconstruction",
+            "TypeScript checks, full Rust tests, formatting, and git diff checks pass",
+            "Direct Vite production build, Rust release build, and NSIS bundle complete without using the controlled pnpm wrapper",
+            "Fresh SHA-256 values are recorded for the release executable and NSIS installer",
+            "The running CC Switch installation is not replaced and no paid provider verification is sent",
+            "MSI remains explicitly unverified if WiX is unavailable"
+          ],
+          "priority": 11,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-006-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "docs/codex-portable-provider-handoff.md",
+            "scripts/ralph/progress.txt"
+          ],
+          "touches": [
+            "docs/deployment",
+            "release/windows"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-006"
+        }
+      ]
     }
   ],
-  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T06:33:07.2278457+08:00."
+  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T06:59:35.6728934+08:00."
 }

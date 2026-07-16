@@ -2,6 +2,21 @@
 Started: 2026-07-17T02:40:00+08:00
 ---
 
+## 2026-07-17 - Execution brief for US-006
+- Project: cc-switch-fork-work
+- User goal: wire `codexPortableHandoffOnProviderChange` into the request path and regenerate verified Windows release artifacts.
+- Assumptions:
+  - Disabling the setting still enforces provider-boundary sanitization and only skips local rollout transcript reconstruction.
+  - Codex App keeps one conversation home; CLI run-scoped homes remain isolated.
+  - No paid provider verification, installation, or replacement of the running CC Switch is authorized.
+- Story list:
+  - `US-006-ST-001`: runtime setting wiring and behavior regression tests.
+  - `US-006-ST-002`: deployment documentation, full checks, Vite/Rust/NSIS rebuild, and SHA-256 recording.
+- Acceptance checks: focused enabled/disabled handoff tests, full Rust and TypeScript checks, formatting/diff checks, production Vite + Rust release + NSIS, artifact hashes.
+- Max iterations: 4
+- Mode: dirty continuation on `qiji/local-codex-post-switch-runner`; no branch switch and no parallel writers.
+---
+
 ## Execution Brief
 - Project: cc-switch-fork-work
 - Goal: preserve one Codex App thread while CC Switch hot-switches among approved providers, automatically reproducing the visible-context effect of a manual full-copy handoff.
@@ -344,4 +359,61 @@ Started: 2026-07-17T02:40:00+08:00
   - A Tauri release executable can build successfully while the default all-bundle command later fails on an external MSI/WiX download; report the verified bundle type and the unavailable bundle separately.
   - Keep App conversation storage independent from provider credentials: one Codex App home plus proxy takeover supports hot switching, while CLI run-scoped homes remain untouched.
   - Ralph completion state may remain false when the child model hits a provider error after tests and artifacts finish; recover from primary logs and artifact hashes instead of repeating expensive builds.
+---
+
+## 2026-07-17 06:59 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-065934-RunProject-36632
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T06:59:35.4035566+08:00
+---
+
+## 2026-07-17 06:59 +08:00 - Execution analysis for Run ID: 20260717-065934-RunProject-36632
+- Subtasks analyzed: 2
+- Parallel batches: 0
+- Batch 1 (serial): US-006/US-006-ST-001
+- Batch 2 (serial): US-006/US-006-ST-002
+---
+
+## 2026-07-17 06:59 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-065934-RunProject-36632
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 07:12 +08:00 - US-006-ST-001
+- Story: US-006 - Wire the handoff toggle and refresh release artifacts
+- What was implemented
+  - Read `codexPortableHandoffOnProviderChange` whenever a request creates a new `RequestForwarder`, so a saved UI change applies to the next request without restarting the proxy.
+  - Kept provider-boundary sanitization unconditional, while making disabled mode return the sanitized request before any local rollout read or portable transcript injection.
+  - Added a regression proving disabled mode does not call the transcript reader or add the portable marker, but still removes `previous_response_id`, response item ids, encrypted reasoning, and compaction state.
+- Files changed
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Focused disabled-mode test: passed, 1 passed / 0 failed.
+  - Enabled compacted-handoff test: passed, 1 passed / 0 failed.
+  - Independent provider-candidate sanitization test: passed, 1 passed / 0 failed.
+  - Full proxy regression: passed, 960 passed / 0 failed.
+  - `rustfmt --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean; the change remains at the existing request-construction and handoff boundaries with no new abstraction or dependency.
+  - `test-guard`: clean; the test asserts observable sanitized output and uses the injected rollout reader only as the filesystem-boundary probe.
+- Browser verification result: not applicable; this is proxy runtime behavior with no UI change.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - The setting controls only local visible-transcript reconstruction; provider-specific state removal is a non-optional safety boundary.
+  - Snapshot settings when constructing each request forwarder so persisted UI changes apply on the next request while a single request remains internally consistent.
 ---
