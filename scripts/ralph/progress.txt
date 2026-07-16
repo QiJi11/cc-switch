@@ -23,6 +23,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Treat rollout `compacted`, reasoning, event, context, and world-state records as internal; portable visible transcripts come only from user/assistant `response_item` messages, attachment references, and completed tool outputs.
 - Compare the rollout's trailing user message with the current Responses input after applying the same visible-content normalization; only remove an exact match, because the rollout write may lag the proxy request.
 - Detect portable transcript requests before provider-specific format conversion, and suppress full request-body debug logging for the rest of that attempt; transformed Chat payloads may no longer retain the Responses marker shape.
+- For backward-compatible default-on settings, pair Rust `#[serde(default = "default_true")]` with the same `true` default in `AppSettings::default` and every frontend form initialization/reset baseline; preserve explicit `false` with nullish fallback rather than truthiness checks.
 ---
 
 ## 2026-07-17 03:06 +08:00 - Ralph session
@@ -192,4 +193,36 @@ Started: 2026-07-17T02:40:00+08:00
   - Current-input deduplication must compare normalized structured content rather than assuming the rollout's final user entry is current.
   - Log suppression must be decided on the original Responses body because provider adapters may transform the marker into a different wire format before logging.
   - Local transcript/build failures are client-visible safety failures, not provider health failures; release any half-open permit neutrally and stop before forwarding.
+---
+
+## 2026-07-17 05:17 +08:00 - US-004-ST-001
+- Story: US-004 - User control and safe defaults
+- What was implemented
+  - Added `codexPortableHandoffOnProviderChange` to the Rust settings model, TypeScript settings interface, and Zod settings schema.
+  - Defaulted missing legacy values to enabled during Rust deserialization and frontend form normalization without adding any write to the read path.
+  - Preserved an explicit `false` value through serialization, initialization, empty-state updates, and form reset merges.
+- Files changed
+  - `src-tauri/src/settings.rs`
+  - `src/types.ts`
+  - `src/lib/schemas/settings.ts`
+  - `src/hooks/useSettingsForm.ts`
+  - `tests/hooks/useSettingsForm.test.tsx`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib settings::tests`: passed, 13 passed, 0 failed, including serialization and existing settings merge tests.
+  - `node .\\node_modules\\vitest\\vitest.mjs run tests/hooks/useSettingsForm.test.tsx`: passed, 7 passed, 0 failed.
+  - `node .\\node_modules\\typescript\\bin\\tsc --noEmit`: passed.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - Direct Prettier check for the four changed TypeScript files and the hook test: passed.
+  - `git diff --check`: passed.
+  - Full Vitest run was not green: unrelated `tests/integration/App.test.tsx` cases failed on existing Tauri/MSW test isolation (timeouts, missing `list_profiles` handler, and leaked provider state); the file still failed when run alone, while the focused settings form suite passed.
+  - `clean-code-guard`: clean. `test-guard`: no violations; assertions extend existing merge scenarios without duplicate test bodies.
+- Browser verification result: not applicable; this subtask changes settings persistence and form normalization but does not expose UI controls.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Default-on compatibility must be mirrored in Rust deserialization/default construction and all frontend form baselines, while `?? true` preserves an intentional `false`.
+  - The Codex `pnpm` wrapper may attempt dependency reconciliation before project scripts; direct installed binaries provide non-mutating checks when build-script approval is intentionally withheld.
+  - The current full frontend suite has unrelated isolation failures in `tests/integration/App.test.tsx`; use the focused settings suite for this subtask and retain the full-suite failure as a known baseline signal.
 ---

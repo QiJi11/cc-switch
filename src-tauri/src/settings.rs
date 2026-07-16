@@ -381,6 +381,10 @@ pub struct AppSettings {
     /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
     #[serde(default)]
     pub preserve_codex_official_auth_on_switch: bool,
+    /// Preserve portable Codex conversation context when a session changes providers.
+    /// Defaults to true so legacy settings retain the safe handoff behavior.
+    #[serde(default = "default_true")]
+    pub codex_portable_handoff_on_provider_change: bool,
     /// Run official Codex providers under the shared "custom" model_provider id
     /// so official sessions share one resume-history bucket with third-party
     /// providers. Opt-in: defaults to false.
@@ -519,6 +523,7 @@ impl Default for AppSettings {
             enable_failover_toggle: false,
             show_profile_switcher: true,
             preserve_codex_official_auth_on_switch: false,
+            codex_portable_handoff_on_provider_change: true,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
@@ -1177,5 +1182,31 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn legacy_settings_default_portable_handoff_to_enabled() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "showInTray": true,
+            "minimizeToTrayOnClose": true
+        }))
+        .expect("legacy settings");
+
+        assert!(settings.codex_portable_handoff_on_provider_change);
+    }
+
+    #[test]
+    fn portable_handoff_setting_serializes_and_preserves_explicit_false() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "codexPortableHandoffOnProviderChange": false
+        }))
+        .expect("settings with portable handoff disabled");
+        assert!(!settings.codex_portable_handoff_on_provider_change);
+
+        let serialized = serde_json::to_value(settings).expect("serialize settings");
+        assert_eq!(
+            serialized.get("codexPortableHandoffOnProviderChange"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 }
