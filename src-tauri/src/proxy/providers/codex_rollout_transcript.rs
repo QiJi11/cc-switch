@@ -236,7 +236,8 @@ impl<'a> RolloutSearch<'a> {
 pub(crate) fn read_visible_transcript(
     session_id: &str,
 ) -> Result<VisibleTranscript, RolloutTranscriptError> {
-    read_visible_transcript_from_home(&get_codex_config_dir(), session_id)
+    let rollout_session_id = session_id.strip_prefix("codex_").unwrap_or(session_id);
+    read_visible_transcript_from_home(&get_codex_config_dir(), rollout_session_id)
 }
 
 fn read_visible_transcript_from_home(

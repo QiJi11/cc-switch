@@ -283,8 +283,8 @@
             "No paid or external model request is sent"
           ],
           "priority": 8,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added a real local-proxy fixture covering A-to-B manual handoff, A 429 to B failover, and B-to-C handoff in one Codex session, including output deduplication and log-secrecy assertions; fixed the HTTP session namespace mismatch exposed by the fixture.",
           "dependsOn": [
             "US-004-ST-002"
           ],
