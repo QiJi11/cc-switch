@@ -23,6 +23,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Treat rollout `compacted`, reasoning, event, context, and world-state records as internal; portable visible transcripts come only from user/assistant `response_item` messages, attachment references, and completed tool outputs.
 - Compare the rollout's trailing user message with the current Responses input after applying the same visible-content normalization; only remove an exact match, because the rollout write may lag the proxy request.
 - Detect portable transcript requests before provider-specific format conversion, and suppress full request-body debug logging for the rest of that attempt; transformed Chat payloads may no longer retain the Responses marker shape.
+- Codex HTTP session extraction namespaces client UUIDs as `codex_<uuid>`; strip only that internal prefix before strict UUID validation and exact rollout lookup.
 - For backward-compatible default-on settings, pair Rust `#[serde(default = "default_true")]` with the same `true` default in `AppSettings::default` and every frontend form initialization/reset baseline; preserve explicit `false` with nullish fallback rather than truthiness checks.
 - The standalone Vite renderer cannot populate settings without Tauri `invoke`; browser-check settings components with a temporary harness that mounts the real component, i18n resources, and project styles, then remove the harness before committing.
 ---
@@ -256,4 +257,34 @@ Started: 2026-07-17T02:40:00+08:00
 - **Learnings for future iterations:**
   - Keep portable handoff beside the existing Codex authentication/history enhancements so it is discoverable without duplicating provider-switching controls.
   - A default-on persisted setting must use `?? true` at the control boundary so an explicit `false` remains visible after reload.
+---
+
+## 2026-07-17 05:45 +08:00 - US-005-ST-001
+- Story: US-005 - Regression and deployment readiness
+- What was implemented
+  - Added an end-to-end Rust proxy fixture that starts the real local proxy and a loopback-only three-provider fake upstream.
+  - Exercised A-to-B manual handoff, A HTTP 429 to B failover, and B-to-C manual handoff under one Codex session id.
+  - Verified candidate-specific request sanitization, one client-visible copy of each assistant output, one executable tool call, transcript redaction, and absence of encrypted secrets and transcript bodies from captured debug logs.
+  - Fixed the HTTP integration mismatch where the internal `codex_` session namespace prevented strict UUID rollout lookup.
+- Files changed
+  - `src-tauri/src/proxy/tests/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/tests/mod.rs`
+  - `src-tauri/src/proxy/mod.rs`
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib three_provider_handoff_stays_local`: passed, 1 passed, 0 failed, 1786 filtered out.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 959 passed, 0 failed, 828 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/mod.rs src-tauri/src/proxy/providers/codex_rollout_transcript.rs src-tauri/src/proxy/tests/mod.rs src-tauri/src/proxy/tests/codex_portable_handoff.rs`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean after limiting the production fix to session-prefix normalization.
+  - `test-guard`: removed internal-helper and exact log-wording assertions; the final fixture tests observable HTTP, response, and log-safety behavior with real local infrastructure.
+- Browser verification result: not applicable; this is a Rust proxy integration fixture with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Full HTTP coverage is required for portable handoff because direct forwarder tests bypass the `codex_` session namespace added by request extraction.
+  - A single loopback Axum upstream can model multiple providers by path while proving that no paid or external model endpoint is contacted.
+  - Failover candidates must derive independently from the original body: the failed A candidate is sanitized, while the successful prior-owner B candidate retains its valid `previous_response_id`.
 ---
