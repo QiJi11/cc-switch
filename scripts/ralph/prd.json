@@ -139,8 +139,8 @@
             "Fixture tests cover normal, compacted, malformed, missing, and path safety cases"
           ],
           "priority": 4,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added a read-only, exact-UUID Codex rollout reader with typed fail-closed errors, visible-content extraction, credential redaction, and focused normal/compacted/safety fixtures.",
           "dependsOn": [
             "US-002-ST-002"
           ],
