@@ -196,8 +196,8 @@
       "title": "User control and safe defaults",
       "description": "As a CC Switch user, I need the behavior visible and controllable without creating another switching interface.",
       "priority": 6,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "Added the default-on portable handoff toggle to the existing Codex App Enhancements section with verified Chinese and English safety copy.",
       "subtasks": [
         {
           "id": "US-004-ST-001",
@@ -242,8 +242,8 @@
             "Frontend typecheck passes"
           ],
           "priority": 7,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added and browser-verified one toggle in the existing Codex settings UI; both locales explain portable visible context and discarded provider-specific encrypted reasoning.",
           "dependsOn": [
             "US-004-ST-001"
           ],
