@@ -19,6 +19,8 @@ Started: 2026-07-17T02:40:00+08:00
 - Keep Codex route ownership in `ProxyState` and represent each request as an uncommitted attempt; only a fully successful completion may commit its provider, while dropping headers-only or partial-stream attempts leaves ownership unchanged.
 - Derive every failover candidate body from the original Responses request, then sanitize against the last fully successful provider; carry the route attempt with the response lifecycle and commit only on a complete body or `response.completed` SSE event.
 - Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
+- Locate a Codex rollout by an exact UUID filename suffix, then verify the same UUID in `session_meta`; canonicalize the Codex home, session root, and file before any read, and never follow session-tree symlinks.
+- Treat rollout `compacted`, reasoning, event, context, and world-state records as internal; portable visible transcripts come only from user/assistant `response_item` messages, attachment references, and completed tool outputs.
 ---
 
 ## 2026-07-17 03:06 +08:00 - Ralph session
@@ -128,4 +130,30 @@ Started: 2026-07-17T02:40:00+08:00
 - **Learnings for future iterations:**
   - OpenAI Responses streams expose typed semantic events; `response.completed` is the terminal success signal suitable for route ownership, while earlier output and function-call events are already client-visible and must not enable cross-provider replay.
   - Connection accounting and route ownership share the same response lifetime; keeping both in one lifecycle value prevents transformed and pass-through paths from committing at different stages.
+---
+
+## 2026-07-17 04:34 +08:00 - US-003-ST-001
+- Story: US-003 - Portable visible transcript fallback
+- What was implemented
+  - Added a read-only Codex rollout reader that resolves the active Codex home through the existing settings-aware helper and locates one rollout by an exact session UUID.
+  - Added canonical root/file validation, symlink rejection, bounded directory depth, a 16 MiB read limit, strict JSONL parsing, session metadata verification, and typed errors for invalid, missing, ambiguous, oversized, malformed, and path-escaping inputs.
+  - Extracted ordered user/assistant text, sanitized attachment references, and completed function/custom tool results while excluding system/developer messages, synthetic context injections, compaction summaries, reasoning, encrypted content, incomplete tool results, and common raw credentials.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_rollout_transcript`: passed, 9 passed, 0 failed, 1768 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_rollout_transcript.rs src-tauri/src/proxy/providers/mod.rs`: passed.
+  - `git diff --cached --check`: passed.
+  - Clean-code guard split the scanner/parser responsibilities and replaced output parameters with typed return values; test guard split independent boundary scenarios. The added Bearer-token counterexample initially failed, exposed redaction ordering, and passed after Bearer/JWT replacement was moved before generic assignment redaction.
+  - One expected staged `dead_code` warning remains for `read_visible_transcript`; the dependent `US-003-ST-002` subtask will wire this entry point into forwarding.
+- Browser verification result: not applicable; this is a read-only Rust rollout parser with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Official Codex rollout records are tagged JSONL items; compaction checkpoints and their summaries are model-context state, not a user-visible transcript source.
+  - Credential redaction must consume complete Bearer/JWT-like tokens before generic `key=value` replacement, or the scheme name can be removed while the credential remains.
+  - Canonical path checks must be applied both during candidate discovery and again immediately before opening the file.
 ---
