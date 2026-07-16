@@ -288,3 +288,60 @@ Started: 2026-07-17T02:40:00+08:00
   - A single loopback Axum upstream can model multiple providers by path while proving that no paid or external model endpoint is contacted.
   - Failover candidates must derive independently from the original body: the failed A candidate is sanitized, while the successful prior-owner B candidate retains its valid `previous_response_id`.
 ---
+
+## 2026-07-17 06:33 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-063306-RunProject-58176
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T06:33:07.0268825+08:00
+---
+
+## 2026-07-17 06:33 +08:00 - Execution analysis for Run ID: 20260717-063306-RunProject-58176
+- Subtasks analyzed: 1
+- Parallel batches: 0
+- Batch 1 (serial): US-005/US-005-ST-002
+---
+
+## 2026-07-17 06:33 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-063306-RunProject-58176
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M pnpm-workspace.yaml
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+  ?? scripts/ralph/tauri-build-check.conf.json
+---
+
+## 2026-07-17 06:43 +08:00 - US-005-ST-002
+- Story: US-005 - Regression and deployment readiness
+- What was implemented
+  - Added deployment, validation, and rollback instructions for keeping Codex App on one conversation home while CC Switch routes the same thread across providers.
+  - Recorded the verified full-check evidence and separated the successful release/NSIS outputs from the unavailable MSI bundle, whose WiX download timed out.
+  - Removed the temporary Tauri build override and reverted the `pnpm-workspace.yaml` build-approval prompt residue without approving scripts or reinstalling dependencies.
+- Files changed
+  - `docs/codex-portable-provider-handoff.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Full Rust test evidence from the interrupted Ralph iteration: library tests passed, `1785 passed / 2 ignored / 0 failed`; all subsequent integration targets passed, including proxy, failover, settings, provider service, and Codex history migration coverage.
+  - Local three-provider proxy regression from US-005-ST-001: passed, `959 passed / 0 failed`; no paid or external model endpoint was contacted.
+  - Production build evidence: Vite and Rust release build passed; `src-tauri\target\release\cc-switch.exe` and the NSIS installer were generated. The default all-bundle command reached MSI packaging but failed only while downloading WiX (`timeout: global`), so MSI is not reported as verified.
+  - Documentation guard verified every setting name, error code, path rule, backup behavior, and test count against source or captured build/test output.
+  - `git diff --check`: passed.
+- Browser verification result: not applicable; this subtask adds operational documentation and validates existing build artifacts.
+- Final deliverables:
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\docs\codex-portable-provider-handoff.md
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\bundle\nsis\CC Switch_3.16.5_x64-setup.exe
+- **Learnings for future iterations:**
+  - A Tauri release executable can build successfully while the default all-bundle command later fails on an external MSI/WiX download; report the verified bundle type and the unavailable bundle separately.
+  - Keep App conversation storage independent from provider credentials: one Codex App home plus proxy takeover supports hot switching, while CLI run-scoped homes remain untouched.
+  - Ralph completion state may remain false when the child model hits a provider error after tests and artifacts finish; recover from primary logs and artifact hashes instead of repeating expensive builds.
+---

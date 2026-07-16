@@ -269,8 +269,8 @@
       "title": "Regression and deployment readiness",
       "description": "As the operator, I need evidence that the feature is safe before replacing the installed CC Switch binary.",
       "priority": 8,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "Full Rust, TypeScript, proxy, failover, settings, provider-service, and Codex history checks passed; a release executable and NSIS installer were produced, with deployment and rollback steps documented. The default MSI bundle remained unavailable because the WiX download timed out.",
       "subtasks": [
         {
           "id": "US-005-ST-001",
@@ -313,8 +313,8 @@
             "No paid verification is performed without a separate explicit authorization"
           ],
           "priority": 9,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Verified the existing full-check outputs and production artifacts, documented non-disruptive rollout and rollback, preserved the single App conversation home and isolated CLI run homes, and performed no paid verification.",
           "dependsOn": [
             "US-005-ST-001"
           ],
@@ -334,5 +334,5 @@
       ]
     }
   ],
-  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T03:06:38.4369147+08:00."
+  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T06:33:07.2278457+08:00."
 }
