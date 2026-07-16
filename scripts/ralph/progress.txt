@@ -16,6 +16,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Codex provider changes may invalidate reasoning.encrypted_content. Portable handoff must preserve user-visible conversation data while treating provider-bound encrypted reasoning as non-portable.
 - Responses API item `id` values are provider-scoped, while `call_id` and attachment `file_id` values carry portable tool/output and file linkage; sanitization must not conflate them.
 - Keep request sanitizers scoped to the Responses `input` history so similarly named keys in request metadata or tool schemas are not accidentally rewritten.
+- Keep Codex route ownership in `ProxyState` and represent each request as an uncommitted attempt; only a fully successful completion may commit its provider, while dropping headers-only or partial-stream attempts leaves ownership unchanged.
 - Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
 ---
 
@@ -72,4 +73,31 @@ Started: 2026-07-17T02:40:00+08:00
   - OpenAI Codex protocol models assign response item IDs separately from portable `call_id` and `file_id` references.
   - Official compaction response items currently carry opaque encrypted content; a future readable summary can be retained without forwarding the encrypted payload.
   - The Tauri lib-test target has a long cold compile on Windows; subsequent focused runs reuse the cache and complete quickly.
+---
+
+## 2026-07-17 03:48 +08:00 - US-002-ST-001
+- Story: US-002 - Session-aware provider handoff
+- What was implemented
+  - Added a bounded, process-local LRU cache from Codex session id to the last fully successful provider id.
+  - Added an explicit route-attempt API: lookups are read-only and ownership changes only through `complete_successfully`; dropping an attempt after headers, a partial SSE stream, failure, or cancellation leaves the previous provider unchanged.
+  - Attached the route state to `ProxyState`, so concurrent requests share one synchronized cache and a proxy restart naturally creates an empty cache.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_route_state.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `src-tauri/src/proxy/server.rs`
+  - `src-tauri/src/proxy/response_processor.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_route_state.rs src-tauri/src/proxy/providers/mod.rs src-tauri/src/proxy/server.rs src-tauri/src/proxy/response_processor.rs`: passed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_route_state`: passed, 7 passed, 0 failed, 1757 filtered out. The first invocation exceeded its 120-second wrapper timeout during compilation; its recorded child process completed, and the cached rerun produced the passing result in 18.2 seconds.
+  - `git diff --check`: passed.
+  - Compiler emitted one expected staged `dead_code` warning for `ProxyState.codex_route_state`; `US-002-ST-002` is the dependent request/response wiring subtask that will consume it.
+- Browser verification result: not applicable; this is in-memory Rust proxy state with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - The cache uses the repository's existing `HashMap + VecDeque + lock` bounded-state pattern, avoiding a new dependency for a small fixed-size store.
+  - A consuming completion token makes partial SSE and cancellation behavior explicit: ownership is unchanged unless the token is committed.
+  - GitHub's anonymous API was rate-limited during reuse research; Rust standard-library docs and crates.io metadata were available, and no external cache dependency was adopted.
 ---
