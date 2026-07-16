@@ -24,6 +24,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Compare the rollout's trailing user message with the current Responses input after applying the same visible-content normalization; only remove an exact match, because the rollout write may lag the proxy request.
 - Detect portable transcript requests before provider-specific format conversion, and suppress full request-body debug logging for the rest of that attempt; transformed Chat payloads may no longer retain the Responses marker shape.
 - For backward-compatible default-on settings, pair Rust `#[serde(default = "default_true")]` with the same `true` default in `AppSettings::default` and every frontend form initialization/reset baseline; preserve explicit `false` with nullish fallback rather than truthiness checks.
+- The standalone Vite renderer cannot populate settings without Tauri `invoke`; browser-check settings components with a temporary harness that mounts the real component, i18n resources, and project styles, then remove the harness before committing.
 ---
 
 ## 2026-07-17 03:06 +08:00 - Ralph session
@@ -225,4 +226,34 @@ Started: 2026-07-17T02:40:00+08:00
   - Default-on compatibility must be mirrored in Rust deserialization/default construction and all frontend form baselines, while `?? true` preserves an intentional `false`.
   - The Codex `pnpm` wrapper may attempt dependency reconciliation before project scripts; direct installed binaries provide non-mutating checks when build-script approval is intentionally withheld.
   - The current full frontend suite has unrelated isolation failures in `tests/integration/App.test.tsx`; use the focused settings suite for this subtask and retain the full-suite failure as a known baseline signal.
+---
+
+## 2026-07-17 05:27 +08:00 - US-004-ST-002
+- Story: US-004 - User control and safe defaults
+- What was implemented
+  - Added a default-on portable handoff toggle to the existing Codex App Enhancements section; no provider switching panel or second settings surface was introduced.
+  - Added Chinese and English copy explaining that visible messages, attachment references, and completed tool results are preserved while provider-specific encrypted reasoning is discarded and not sent to the new provider.
+- Files changed
+  - `src/components/settings/CodexAuthSettings.tsx`
+  - `src/i18n/locales/zh.json`
+  - `src/i18n/locales/en.json`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Direct Prettier check for the three changed frontend files: passed.
+  - `node .\node_modules\vite\bin\vite.js build`: passed, 3292 modules transformed; only existing dependency-data, dynamic-import, and chunk-size warnings were emitted.
+  - Both locale JSON files parsed successfully with `ConvertFrom-Json`.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean.
+- Browser verification result:
+  - Chrome rendered the real `CodexAuthSettings` component with project styles and i18n through a temporary Vite harness that was removed after verification.
+  - Chinese and English titles/descriptions were visible, the new switch rendered checked by default, and a click changed it from `checked` to `unchecked`.
+  - Desktop and 390 x 844 mobile views showed no overlap; DOM checks confirmed no horizontal overflow.
+  - The standalone full Settings page could not load settings without the Tauri runtime (`window.__TAURI_INTERNALS__.invoke` was unavailable), so browser verification was scoped to the real component while source inspection confirmed it remains mounted in the existing Settings page.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Keep portable handoff beside the existing Codex authentication/history enhancements so it is discoverable without duplicating provider-switching controls.
+  - A default-on persisted setting must use `?? true` at the control boundary so an explicit `false` remains visible after reload.
 ---
