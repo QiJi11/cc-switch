@@ -17,6 +17,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Responses API item `id` values are provider-scoped, while `call_id` and attachment `file_id` values carry portable tool/output and file linkage; sanitization must not conflate them.
 - Keep request sanitizers scoped to the Responses `input` history so similarly named keys in request metadata or tool schemas are not accidentally rewritten.
 - Keep Codex route ownership in `ProxyState` and represent each request as an uncommitted attempt; only a fully successful completion may commit its provider, while dropping headers-only or partial-stream attempts leaves ownership unchanged.
+- Derive every failover candidate body from the original Responses request, then sanitize against the last fully successful provider; carry the route attempt with the response lifecycle and commit only on a complete body or `response.completed` SSE event.
 - Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
 ---
 
@@ -100,4 +101,31 @@ Started: 2026-07-17T02:40:00+08:00
   - The cache uses the repository's existing `HashMap + VecDeque + lock` bounded-state pattern, avoiding a new dependency for a small fixed-size store.
   - A consuming completion token makes partial SSE and cancellation behavior explicit: ownership is unchanged unless the token is committed.
   - GitHub's anonymous API was rate-limited during reuse research; Rust standard-library docs and crates.io metadata were available, and no external cache dependency was adopted.
+---
+
+## 2026-07-17 04:07 +08:00 - US-002-ST-002
+- Story: US-002 - Session-aware provider handoff
+- What was implemented
+  - Wired the Codex provider-boundary sanitizer into each `/responses` and `/responses/compact` provider candidate, so manual switches and failover retries independently derive a safe body from the original request.
+  - Carried the successful candidate's route attempt through direct Responses and Chat-to-Responses handling; non-streaming responses commit after the complete body is rebuilt, while streams commit only on `response.completed`.
+  - Kept headers-only, partial SSE, tool-instruction exposure, stream failures, and cancellations uncommitted, so no later request treats an incomplete provider as the session owner.
+  - Preserved the existing successful-candidate path that synchronizes the actual provider with CC Switch status, UI, and tray failover behavior.
+- Files changed
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `src-tauri/src/proxy/response_processor.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 942 passed, 0 failed, 826 filtered out.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - Focused regression coverage verifies manual/failover candidate sanitization, Responses-only scoping, partial tool-call SSE non-commit, and `response.completed` commit.
+- Browser verification result: not applicable; this is Rust proxy forwarding and response lifecycle behavior with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - OpenAI Responses streams expose typed semantic events; `response.completed` is the terminal success signal suitable for route ownership, while earlier output and function-call events are already client-visible and must not enable cross-provider replay.
+  - Connection accounting and route ownership share the same response lifetime; keeping both in one lifecycle value prevents transformed and pass-through paths from committing at different stages.
 ---

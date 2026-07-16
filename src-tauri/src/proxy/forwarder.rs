@@ -12,8 +12,11 @@ use super::{
     log_codes::fwd as log_fwd,
     provider_router::ProviderRouter,
     providers::{
-        codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore, get_adapter,
-        AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
+        codex_chat_history::CodexChatHistoryStore,
+        codex_portable_handoff::sanitize_codex_handoff_request,
+        codex_route_state::{CodexRouteAttempt, CodexRouteState},
+        gemini_shadow::GeminiShadowStore,
+        get_adapter, AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
     },
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
@@ -50,6 +53,8 @@ pub struct ForwardResult {
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
+    /// Codex session ownership is committed only after the response completes.
+    pub(crate) codex_route_attempt: Option<CodexRouteAttempt>,
 }
 
 pub struct ForwardError {
@@ -102,6 +107,7 @@ pub struct RequestForwarder {
     current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
+    codex_route_state: Arc<CodexRouteState>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -184,6 +190,7 @@ impl RequestForwarder {
         current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
         gemini_shadow: Arc<GeminiShadowStore>,
         codex_chat_history: Arc<CodexChatHistoryStore>,
+        codex_route_state: Arc<CodexRouteState>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -205,6 +212,7 @@ impl RequestForwarder {
             current_providers,
             gemini_shadow,
             codex_chat_history,
+            codex_route_state,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -219,6 +227,32 @@ impl RequestForwarder {
             ),
             max_attempts,
         }
+    }
+
+    fn prepare_codex_handoff_attempt(
+        &self,
+        app_type: &AppType,
+        endpoint: &str,
+        provider: &Provider,
+        body: Value,
+    ) -> (Value, Option<CodexRouteAttempt>) {
+        let path = endpoint.split('?').next().unwrap_or(endpoint);
+        if !matches!(app_type, AppType::Codex)
+            || !matches!(path, "/responses" | "/responses/compact")
+            || !self.session_client_provided
+        {
+            return (body, None);
+        }
+
+        let attempt = self
+            .codex_route_state
+            .begin_attempt(self.session_id.clone(), provider.id.clone());
+        let body = if attempt.is_provider_change() {
+            sanitize_codex_handoff_request(&body, true).into_owned()
+        } else {
+            body
+        };
+        (body, Some(attempt))
     }
 
     async fn record_success_result(
@@ -431,19 +465,20 @@ impl RequestForwarder {
 
             // PRE-SEND 优化器：每个 provider 独立决定是否优化
             // clone body 以避免 Bedrock 优化字段泄漏到非 Bedrock provider（failover 场景）
-            let mut provider_body =
-                if self.optimizer_config.enabled && is_bedrock_provider(provider) {
-                    let mut b = body.clone();
-                    if self.optimizer_config.thinking_optimizer {
-                        super::thinking_optimizer::optimize(&mut b, &self.optimizer_config);
-                    }
-                    if self.optimizer_config.cache_injection {
-                        super::cache_injector::inject(&mut b, &self.optimizer_config);
-                    }
-                    b
-                } else {
-                    body.clone()
-                };
+            let provider_body = if self.optimizer_config.enabled && is_bedrock_provider(provider) {
+                let mut b = body.clone();
+                if self.optimizer_config.thinking_optimizer {
+                    super::thinking_optimizer::optimize(&mut b, &self.optimizer_config);
+                }
+                if self.optimizer_config.cache_injection {
+                    super::cache_injector::inject(&mut b, &self.optimizer_config);
+                }
+                b
+            } else {
+                body.clone()
+            };
+            let (mut provider_body, mut codex_route_attempt) =
+                self.prepare_codex_handoff_attempt(app_type, endpoint, provider, provider_body);
 
             attempted_providers += 1;
 
@@ -522,6 +557,7 @@ impl RequestForwarder {
                         claude_api_format,
                         outbound_model,
                         connection_guard: None,
+                        codex_route_attempt: codex_route_attempt.take(),
                     });
                 }
                 Err(e) => {
@@ -625,6 +661,7 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        codex_route_attempt: codex_route_attempt.take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -774,6 +811,7 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             connection_guard: None,
+                                            codex_route_attempt: codex_route_attempt.take(),
                                         });
                                     }
                                     Err(retry_err) => {
@@ -934,6 +972,7 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        codex_route_attempt: codex_route_attempt.take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -2833,6 +2872,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            codex_route_state: Arc::new(CodexRouteState::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -3190,6 +3230,87 @@ mod tests {
         };
 
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
+    }
+
+    #[test]
+    fn codex_provider_candidates_sanitize_handoffs_independently() {
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "session-1".to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt("session-1", &provider_a.id)
+            .complete_successfully();
+
+        let original = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "message", "id": "msg_provider_a", "role": "user", "content": "hello"}
+            ]
+        });
+
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let (body_for_b, attempt_b) = forwarder.prepare_codex_handoff_attempt(
+            &AppType::Codex,
+            "/responses",
+            &provider_b,
+            original.clone(),
+        );
+        assert!(body_for_b.get("previous_response_id").is_none());
+        assert!(body_for_b["input"][0].get("id").is_none());
+        drop(attempt_b);
+
+        let mut provider_c = provider_a.clone();
+        provider_c.id = "provider-c".to_string();
+        let (body_for_c, attempt_c) = forwarder.prepare_codex_handoff_attempt(
+            &AppType::Codex,
+            "/responses",
+            &provider_c,
+            original.clone(),
+        );
+        assert!(body_for_c.get("previous_response_id").is_none());
+        assert!(body_for_c["input"][0].get("id").is_none());
+        drop(attempt_c);
+    }
+
+    #[test]
+    fn codex_handoff_sanitization_is_scoped_to_responses_provider_changes() {
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "session-1".to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt("session-1", &provider_a.id)
+            .complete_successfully();
+
+        let original = json!({"previous_response_id": "resp_provider_a", "input": []});
+        let (same_provider_body, same_provider_attempt) = forwarder.prepare_codex_handoff_attempt(
+            &AppType::Codex,
+            "/responses",
+            &provider_a,
+            original.clone(),
+        );
+        assert_eq!(same_provider_body, original);
+        drop(same_provider_attempt);
+
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let (chat_body, chat_attempt) = forwarder.prepare_codex_handoff_attempt(
+            &AppType::Codex,
+            "/chat/completions",
+            &provider_b,
+            original.clone(),
+        );
+        assert_eq!(chat_body, original);
+        assert!(chat_attempt.is_none());
     }
 
     #[test]
