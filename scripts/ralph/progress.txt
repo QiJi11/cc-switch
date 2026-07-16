@@ -1,0 +1,75 @@
+# Ralph Progress Log
+Started: 2026-07-17T02:40:00+08:00
+---
+
+## Execution Brief
+- Project: cc-switch-fork-work
+- Goal: preserve one Codex App thread while CC Switch hot-switches among approved providers, automatically reproducing the visible-context effect of a manual full-copy handoff.
+- Assumptions: Codex App uses one shared conversation home; provider credentials remain managed by CC Switch; approved providers are 630 Codex Pool 2, 800 Codex Pool 1, and BLA Codex 3; no paid probes are authorized.
+- Stories: request sanitization; session-aware routing; compacted transcript fallback; user setting; regression and deployment readiness.
+- Acceptance: same session across providers, safe 429 failover, no repeated tool execution, no credential/transcript logging, relevant tests and build pass.
+- Max iterations: 10.
+- Baseline: clean worktree on qiji/local-codex-post-switch-runner before Ralph initialization; scripts/ralph was then initialized for this run.
+
+## Codebase Patterns
+- CC Switch already has Codex proxy takeover, provider hot-switch UI synchronization, failover routing, session-id extraction, and local history migration; extend those paths instead of introducing a second proxy service.
+- Codex provider changes may invalidate reasoning.encrypted_content. Portable handoff must preserve user-visible conversation data while treating provider-bound encrypted reasoning as non-portable.
+- Responses API item `id` values are provider-scoped, while `call_id` and attachment `file_id` values carry portable tool/output and file linkage; sanitization must not conflate them.
+- Keep request sanitizers scoped to the Responses `input` history so similarly named keys in request metadata or tool schemas are not accidentally rewritten.
+- Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
+---
+
+## 2026-07-17 03:06 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-030634-RunProject-49184
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T03:06:37.5033159+08:00
+---
+
+## 2026-07-17 03:06 +08:00 - Execution analysis for Run ID: 20260717-030634-RunProject-49184
+- Subtasks analyzed: 9
+- Parallel batches: 0
+- Batch 1 (serial): US-001/US-001-ST-001
+- Batch 2 (serial): US-002/US-002-ST-001
+- Batch 3 (serial): US-002/US-002-ST-002
+- Batch 4 (serial): US-003/US-003-ST-001
+- Batch 5 (serial): US-003/US-003-ST-002
+- Batch 6 (serial): US-004/US-004-ST-001
+- Batch 7 (serial): US-004/US-004-ST-002
+- Batch 8 (serial): US-005/US-005-ST-001
+- Batch 9 (serial): US-005/US-005-ST-002
+---
+
+## 2026-07-17 03:06 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-030634-RunProject-49184
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+  ?? scripts/ralph/
+---
+
+## 2026-07-17 03:34 +08:00 - US-001-ST-001
+- Story: US-001 - Provider-boundary request sanitization
+- What was implemented
+  - Added a pure `Cow<Value>` Codex handoff sanitizer that returns the original request unchanged when no provider boundary exists.
+  - On a provider change, removes `previous_response_id`, response item `id` values, nested `encrypted_content`, encrypted-only reasoning/compaction items, and unresolved `item_reference` items.
+  - Preserves readable reasoning/compaction summaries, visible user/assistant messages, attachment references, completed tool calls, and tool outputs.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_portable_handoff`: passed, 5 passed, 0 failed, 1752 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_portable_handoff.rs src-tauri/src/proxy/providers/mod.rs`: passed.
+  - `git diff --check`: passed.
+- Browser verification result: not applicable; this is a pure Rust proxy transformer with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - OpenAI Codex protocol models assign response item IDs separately from portable `call_id` and `file_id` references.
+  - Official compaction response items currently carry opaque encrypted content; a future readable summary can be retained without forwarding the encrypted payload.
+  - The Tauri lib-test target has a long cold compile on Windows; subsequent focused runs reuse the cache and complete quickly.
+---
