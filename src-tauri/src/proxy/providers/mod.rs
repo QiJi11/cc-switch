@@ -19,6 +19,7 @@ pub(crate) mod codex_chat_common;
 pub mod codex_chat_history;
 pub mod codex_oauth_auth;
 pub(crate) mod codex_portable_handoff;
+pub(crate) mod codex_route_state;
 pub mod copilot_auth;
 pub mod copilot_model_map;
 mod gemini;

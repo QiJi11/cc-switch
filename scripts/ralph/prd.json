@@ -61,8 +61,8 @@
             "Unit tests cover first request, same provider, provider change, concurrent sessions, and pruning"
           ],
           "priority": 2,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added a bounded process-local LRU route store whose request attempts update session ownership only when explicitly completed successfully.",
           "dependsOn": [
             "US-001-ST-001"
           ],
