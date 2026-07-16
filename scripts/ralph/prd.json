@@ -47,8 +47,8 @@
       "title": "Session-aware provider handoff",
       "description": "As a Codex user, I need the proxy to know when one thread moves between providers and apply the sanitizer exactly at that boundary.",
       "priority": 2,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "Provider-boundary sanitization is now applied per Responses candidate, and session ownership commits only after a complete non-streaming body or response.completed SSE event.",
       "subtasks": [
         {
           "id": "US-002-ST-001",
@@ -94,8 +94,8 @@
             "Focused forwarder and handler tests pass"
           ],
           "priority": 3,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Each Codex Responses candidate derives its own handoff body from the original request; completed responses commit the actual provider while partial streams leave prior ownership unchanged.",
           "dependsOn": [
             "US-002-ST-001"
           ],

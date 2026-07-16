@@ -34,7 +34,8 @@ use super::{
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
         read_decoded_body, strip_entity_headers_for_rebuilt_body,
-        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
+        strip_hop_by_hop_response_headers, usage_logging_enabled, ResponseLifecycle,
+        SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -248,7 +249,7 @@ async fn handle_messages_for_app(
         &ctx,
         &state,
         &CLAUDE_PARSER_CONFIG,
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, None),
     )
     .await
 }
@@ -491,7 +492,7 @@ async fn handle_claude_transform(
             "Claude/OpenRouter",
             usage_collector,
             timeout_config,
-            connection_guard,
+            ResponseLifecycle::new(connection_guard, None),
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -755,7 +756,7 @@ pub async fn handle_chat_completions(
         &ctx,
         &state,
         &OPENAI_PARSER_CONFIG,
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, None),
     )
     .await
 }
@@ -841,6 +842,7 @@ async fn handle_responses_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let codex_route_attempt = result.codex_route_attempt.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -863,7 +865,7 @@ async fn handle_responses_for_app(
             &ctx,
             &state,
             is_stream,
-            connection_guard,
+            ResponseLifecycle::new(connection_guard, codex_route_attempt),
             codex_tool_context,
         )
         .await;
@@ -892,7 +894,7 @@ async fn handle_responses_for_app(
         &ctx,
         &state,
         &CODEX_PARSER_CONFIG,
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, codex_route_attempt),
     )
     .await
 }
@@ -975,6 +977,7 @@ async fn handle_responses_compact_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let codex_route_attempt = result.codex_route_attempt.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -997,7 +1000,7 @@ async fn handle_responses_compact_for_app(
             &ctx,
             &state,
             is_stream,
-            connection_guard,
+            ResponseLifecycle::new(connection_guard, codex_route_attempt),
             codex_tool_context,
         )
         .await;
@@ -1021,7 +1024,7 @@ async fn handle_responses_compact_for_app(
         &ctx,
         &state,
         &CODEX_PARSER_CONFIG,
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, codex_route_attempt),
     )
     .await
 }
@@ -1179,7 +1182,7 @@ async fn handle_codex_chat_to_responses_transform(
     ctx: &RequestContext,
     state: &ProxyState,
     is_stream: bool,
-    connection_guard: Option<ActiveConnectionGuard>,
+    lifecycle: ResponseLifecycle,
     tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
@@ -1265,7 +1268,7 @@ async fn handle_codex_chat_to_responses_transform(
             ctx.tag,
             usage_collector,
             ctx.streaming_timeout_config(),
-            connection_guard,
+            lifecycle,
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1282,7 +1285,7 @@ async fn handle_codex_chat_to_responses_transform(
         return Ok((headers, body).into_response());
     }
 
-    let _connection_guard = connection_guard;
+    let _connection_guard = lifecycle.connection_guard;
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
             std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
@@ -1397,12 +1400,18 @@ async fn handle_codex_chat_to_responses_transform(
         ProxyError::TransformError(format!("Failed to serialize responses response: {e}"))
     })?;
 
-    builder
+    let response = builder
         .body(axum::body::Body::from(response_body))
         .map_err(|e| {
             log::error!("[Codex] 构建 Responses 响应失败: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
-        })
+        });
+    if response.is_ok() {
+        if let Some(attempt) = lifecycle.codex_route_attempt {
+            attempt.complete_successfully();
+        }
+    }
+    response
 }
 
 /// Response-transform handler for the Codex (Responses) ↔ Anthropic Messages gateway.
@@ -1992,7 +2001,7 @@ pub async fn handle_gemini(
         &ctx,
         &state,
         &GEMINI_PARSER_CONFIG,
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, None),
     )
     .await
 }

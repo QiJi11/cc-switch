@@ -8,6 +8,7 @@ use super::{
     handler_config::{StreamUsageEventFilter, UsageParserConfig},
     handler_context::{RequestContext, StreamingTimeoutConfig},
     hyper_client::ProxyResponse,
+    providers::codex_route_state::CodexRouteAttempt,
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
     usage::parser::TokenUsage,
@@ -27,6 +28,23 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+
+pub(crate) struct ResponseLifecycle {
+    pub(crate) connection_guard: Option<ActiveConnectionGuard>,
+    pub(crate) codex_route_attempt: Option<CodexRouteAttempt>,
+}
+
+impl ResponseLifecycle {
+    pub(crate) fn new(
+        connection_guard: Option<ActiveConnectionGuard>,
+        codex_route_attempt: Option<CodexRouteAttempt>,
+    ) -> Self {
+        Self {
+            connection_guard,
+            codex_route_attempt,
+        }
+    }
+}
 
 // ============================================================================
 // 响应头处理
@@ -148,7 +166,7 @@ pub async fn handle_streaming(
     ctx: &RequestContext,
     state: &ProxyState,
     parser_config: &UsageParserConfig,
-    connection_guard: Option<ActiveConnectionGuard>,
+    lifecycle: ResponseLifecycle,
 ) -> Response {
     let status = response.status();
     log::debug!(
@@ -191,7 +209,7 @@ pub async fn handle_streaming(
         ctx.tag,
         usage_collector,
         timeout_config,
-        connection_guard,
+        lifecycle,
     );
 
     let body = axum::body::Body::from_stream(logged_stream);
@@ -210,9 +228,10 @@ pub async fn handle_non_streaming(
     ctx: &RequestContext,
     state: &ProxyState,
     parser_config: &UsageParserConfig,
-    // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
-    _connection_guard: Option<ActiveConnectionGuard>,
+    lifecycle: ResponseLifecycle,
 ) -> Result<Response, ProxyError> {
+    // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
+    let _connection_guard = lifecycle.connection_guard;
     // 整包超时：仅在故障转移开启且配置值非零时生效
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
@@ -309,10 +328,16 @@ pub async fn handle_non_streaming(
     }
 
     let body = axum::body::Body::from(body_bytes);
-    builder.body(body).map_err(|e| {
+    let response = builder.body(body).map_err(|e| {
         log::error!("[{}] 构建响应失败: {e}", ctx.tag);
         ProxyError::Internal(format!("Failed to build response: {e}"))
-    })
+    });
+    if response.is_ok() {
+        if let Some(attempt) = lifecycle.codex_route_attempt {
+            attempt.complete_successfully();
+        }
+    }
+    response
 }
 
 /// 通用响应处理入口
@@ -323,12 +348,12 @@ pub async fn process_response(
     ctx: &RequestContext,
     state: &ProxyState,
     parser_config: &UsageParserConfig,
-    connection_guard: Option<ActiveConnectionGuard>,
+    lifecycle: ResponseLifecycle,
 ) -> Result<Response, ProxyError> {
     if is_sse_response(&response) {
-        Ok(handle_streaming(response, ctx, state, parser_config, connection_guard).await)
+        Ok(handle_streaming(response, ctx, state, parser_config, lifecycle).await)
     } else {
-        handle_non_streaming(response, ctx, state, parser_config, connection_guard).await
+        handle_non_streaming(response, ctx, state, parser_config, lifecycle).await
     }
 }
 
@@ -680,16 +705,17 @@ pub fn create_logged_passthrough_stream(
     tag: &'static str,
     usage_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
-    connection_guard: Option<ActiveConnectionGuard>,
+    lifecycle: ResponseLifecycle,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
-        let _conn_guard = connection_guard;
+        let _conn_guard = lifecycle.connection_guard;
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut collector = usage_collector;
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
+        let mut route_attempt = lifecycle.codex_route_attempt;
         let inspect_sse_events =
-            collector.is_some() || log::log_enabled!(log::Level::Debug);
+            collector.is_some() || route_attempt.is_some() || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
 
         // 超时配置
@@ -750,15 +776,21 @@ pub fn create_logged_passthrough_stream(
                                 for line in event_text.lines() {
                                     if let Some(data) = strip_sse_field(line, "data") {
                                         if data.trim() != "[DONE]" {
-                                            let collected = match &collector {
-                                                Some(c) if c.should_collect(data) => {
-                                                    match serde_json::from_str::<Value>(data) {
-                                                        Ok(json_value) => {
-                                                            c.push(json_value).await;
-                                                            true
-                                                        }
-                                                        Err(_) => false,
-                                                    }
+                                            let parsed = serde_json::from_str::<Value>(data).ok();
+                                            if parsed
+                                                .as_ref()
+                                                .and_then(|event| event.get("type"))
+                                                .and_then(Value::as_str)
+                                                == Some("response.completed")
+                                            {
+                                                if let Some(attempt) = route_attempt.take() {
+                                                    attempt.complete_successfully();
+                                                }
+                                            }
+                                            let collected = match (&collector, parsed) {
+                                                (Some(c), Some(json_value)) if c.should_collect(data) => {
+                                                    c.push(json_value).await;
+                                                    true
                                                 }
                                                 _ => false,
                                             };
@@ -866,6 +898,21 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    fn no_streaming_timeouts() -> StreamingTimeoutConfig {
+        StreamingTimeoutConfig {
+            first_byte_timeout: 0,
+            idle_timeout: 0,
+        }
+    }
+
+    fn route_state_owned_by_provider_a() -> Arc<CodexRouteState> {
+        let route_state = Arc::new(CodexRouteState::default());
+        route_state
+            .begin_attempt("session-1", "provider-a")
+            .complete_successfully();
+        route_state
+    }
+
     #[test]
     fn format_headers_keeps_only_allowlisted_diagnostic_values() {
         let mut headers = HeaderMap::new();
@@ -904,6 +951,58 @@ mod tests {
             Some("message_start")
         );
         assert_eq!(super::strip_sse_field("id:1", "data"), None);
+    }
+
+    #[tokio::test]
+    async fn codex_partial_sse_with_tool_instruction_keeps_previous_route() {
+        let route_state = route_state_owned_by_provider_a();
+        let partial_attempt = route_state.begin_attempt("session-1", "provider-b");
+        let partial_stream = futures::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+            Bytes::from_static(
+                b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\"}}\n\n",
+            ),
+        )]);
+        let partial = create_logged_passthrough_stream(
+            partial_stream,
+            "Codex",
+            None,
+            no_streaming_timeouts(),
+            ResponseLifecycle::new(None, Some(partial_attempt)),
+        );
+        let partial_chunks = partial.collect::<Vec<_>>().await;
+        assert_eq!(partial_chunks.len(), 1);
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_sse_commits_successful_provider_route() {
+        let route_state = route_state_owned_by_provider_a();
+        let completed_attempt = route_state.begin_attempt("session-1", "provider-b");
+        let completed_stream = futures::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+            Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            ),
+        )]);
+        let completed = create_logged_passthrough_stream(
+            completed_stream,
+            "Codex",
+            None,
+            no_streaming_timeouts(),
+            ResponseLifecycle::new(None, Some(completed_attempt)),
+        );
+        let completed_chunks = completed.collect::<Vec<_>>().await;
+        assert_eq!(completed_chunks.len(), 1);
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-b")
+        );
     }
 
     #[test]
