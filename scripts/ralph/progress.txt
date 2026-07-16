@@ -21,6 +21,8 @@ Started: 2026-07-17T02:40:00+08:00
 - Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
 - Locate a Codex rollout by an exact UUID filename suffix, then verify the same UUID in `session_meta`; canonicalize the Codex home, session root, and file before any read, and never follow session-tree symlinks.
 - Treat rollout `compacted`, reasoning, event, context, and world-state records as internal; portable visible transcripts come only from user/assistant `response_item` messages, attachment references, and completed tool outputs.
+- Compare the rollout's trailing user message with the current Responses input after applying the same visible-content normalization; only remove an exact match, because the rollout write may lag the proxy request.
+- Detect portable transcript requests before provider-specific format conversion, and suppress full request-body debug logging for the rest of that attempt; transformed Chat payloads may no longer retain the Responses marker shape.
 ---
 
 ## 2026-07-17 03:06 +08:00 - Ralph session
@@ -156,4 +158,38 @@ Started: 2026-07-17T02:40:00+08:00
   - Official Codex rollout records are tagged JSONL items; compaction checkpoints and their summaries are model-context state, not a user-visible transcript source.
   - Credential redaction must consume complete Bearer/JWT-like tokens before generic `key=value` replacement, or the scheme name can be removed while the credential remains.
   - Canonical path checks must be applied both during candidate discovery and again immediately before opening the file.
+---
+
+## 2026-07-17 05:07 +08:00 - US-003-ST-002
+- Story: US-003 - Portable visible transcript fallback
+- What was implemented
+  - Added a compacted-handoff fallback that reads the local visible rollout only when provider-state sanitization would otherwise leave no readable history.
+  - Injected the transcript as one bounded, clearly delimited text message; historical tool results remain inert JSON text and cannot replay as executable tool calls.
+  - Normalized and compared the current user content, including redacted text and attachment references, so only an exact trailing duplicate is removed; rollout-write lag preserves unmatched history.
+  - Added a typed `portable_handoff_unavailable` failure that returns HTTP 503 without sending an unsafe provider request or charging the provider's circuit-breaker health.
+  - Suppressed complete request-body debug logging whenever portable context is present, with detection performed before provider-specific Responses-to-Chat conversion.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/error.rs`
+  - `src-tauri/src/proxy/error_mapper.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib portable_handoff`: passed, 10 passed, 0 failed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib compacted_`: passed, 3 passed, 0 failed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 958 passed, 0 failed, 826 filtered out.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - One initial focused test wrapper timed out during the cold Rust compile; the child compile completed, and all cached reruns above passed.
+  - Clean-code guard found and fixed rollout-lag deduplication and pre-transform body-log suppression; test guard removed a wording-only assertion and retained behavior-focused boundary cases.
+- Browser verification result: not applicable; this is Rust proxy request transformation and local rollout handling with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Current-input deduplication must compare normalized structured content rather than assuming the rollout's final user entry is current.
+  - Log suppression must be decided on the original Responses body because provider adapters may transform the marker into a different wire format before logging.
+  - Local transcript/build failures are client-visible safety failures, not provider health failures; release any half-open permit neutrally and stop before forwarding.
 ---

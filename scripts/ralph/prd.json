@@ -123,8 +123,8 @@
       "title": "Portable visible transcript fallback",
       "description": "As a user resuming a compacted thread, I need the proxy to reconstruct the visible conversation that I would otherwise copy manually.",
       "priority": 4,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "Compacted provider changes now inject one bounded, delimited visible transcript item, deduplicate the current user input, suppress transcript-bearing body logs, and fail closed when safe local history is unavailable.",
       "subtasks": [
         {
           "id": "US-003-ST-001",
@@ -169,8 +169,8 @@
             "Integration tests cover compacted A-to-B handoff and missing transcript failure"
           ],
           "priority": 5,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Added conditional rollout fallback injection, normalized current-input deduplication, stable portable_handoff_unavailable errors, body-log suppression across provider format transforms, and focused integration coverage.",
           "dependsOn": [
             "US-003-ST-001"
           ],
