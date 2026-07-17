@@ -1300,6 +1300,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",
         ProxyError::MaxRetriesExceeded => "cc_switch_max_retries_exceeded",
         ProxyError::PortableHandoffUnavailable => "portable_handoff_unavailable",
+        ProxyError::SessionProviderUnavailable => "session_provider_unavailable",
         ProxyError::ProviderUnhealthy(_) => "cc_switch_provider_unhealthy",
         ProxyError::ConfigError(_) => "cc_switch_config_error",
         ProxyError::TransformError(_) => "cc_switch_transform_error",
@@ -2054,8 +2055,8 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        map_proxy_error_to_status, responses_sse_to_response_value,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
 
@@ -2693,6 +2694,22 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         );
 
         assert_eq!(body["error"]["code"], "portable_handoff_unavailable");
+    }
+
+    #[test]
+    fn codex_session_provider_error_has_stable_code() {
+        let body = codex_proxy_error_json(
+            "Pinned Provider",
+            "gpt-test",
+            "/responses",
+            &ProxyError::SessionProviderUnavailable,
+        );
+
+        assert_eq!(body["error"]["code"], "session_provider_unavailable");
+        assert_eq!(
+            map_proxy_error_to_status(&ProxyError::SessionProviderUnavailable),
+            503
+        );
     }
 
     #[test]

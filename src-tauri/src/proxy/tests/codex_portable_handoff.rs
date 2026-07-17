@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 use crate::{
     app_config::AppType,
     database::Database,
+    error::AppError,
     provider::{Provider, ProviderMeta},
     proxy::{
         server::ProxyServer,
@@ -209,7 +210,22 @@ async fn handle_fake_response(
         index
     };
 
+    if provider == "pinned-timeout" {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
     match (provider.as_str(), call_index) {
+        ("pinned-429", _) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": {"message": "pinned local rate limit"}})),
+        )
+            .into_response(),
+        ("pinned-500", _) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "pinned local upstream failure"}})),
+        )
+            .into_response(),
+        ("pinned-timeout", _) => success_response("resp_too_late", "too-late", false),
         ("a", 0) => success_response("resp_a_1", "assistant-a", false),
         ("a", 1) => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -345,17 +361,28 @@ fn set_current_provider(db: &Database, provider_id: &str) {
 }
 
 async fn post_response(client: &Client, proxy_url: &str, body: Value) -> Value {
+    let (status, body) = post_raw_response(client, proxy_url, SESSION_ID, body).await;
+    assert_eq!(status, StatusCode::OK, "unexpected proxy response: {body}");
+    body
+}
+
+async fn post_raw_response(
+    client: &Client,
+    proxy_url: &str,
+    session_id: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let response = client
         .post(proxy_url)
-        .header("session_id", SESSION_ID)
+        .header("session_id", session_id)
         .json(&body)
         .send()
         .await
         .expect("send request through local proxy");
     let status = response.status();
     let text = response.text().await.expect("read local proxy response");
-    assert_eq!(status, StatusCode::OK, "unexpected proxy response: {text}");
-    serde_json::from_str(&text).expect("parse local proxy response")
+    let body = serde_json::from_str(&text).expect("parse local proxy response");
+    (status, body)
 }
 
 fn output_items(responses: &[Value]) -> impl Iterator<Item = &Value> {
@@ -560,4 +587,150 @@ async fn three_provider_handoff_stays_local_and_does_not_duplicate_output_or_log
             "sensitive fixture data leaked: {excluded}"
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn pinned_retryable_failures_never_use_the_global_fallback() {
+    let _home = TempHome::new();
+    let mut upstream = FakeUpstream::start().await;
+    let db = Arc::new(Database::memory().expect("create in-memory database"));
+    for provider_id in ["b", "pinned-429", "pinned-500", "pinned-timeout"] {
+        db.save_provider("codex", &provider(provider_id, &upstream.base_url))
+            .expect("save local fixture provider");
+    }
+    db.add_to_failover_queue("codex", "b")
+        .expect("queue global fallback");
+    set_current_provider(&db, "b");
+    set_failover(&db, true).await;
+    let mut config = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read Codex proxy config");
+    config.max_retries = 3;
+    config.non_streaming_timeout = 1;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("set pinned failure test timeouts");
+
+    let scenarios = [
+        (
+            "019cc369-bd7c-7891-b371-7b20b4fe0b19",
+            "pinned-429",
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+        (
+            "019cc369-bd7c-7891-b371-7b20b4fe0b1a",
+            "pinned-500",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            "019cc369-bd7c-7891-b371-7b20b4fe0b1b",
+            "pinned-timeout",
+            StatusCode::GATEWAY_TIMEOUT,
+        ),
+    ];
+    for (session_id, provider_id, _) in scenarios {
+        db.set_codex_session_pin(session_id, provider_id)
+            .expect("pin local fixture session");
+    }
+
+    let proxy = ProxyServer::new(
+        ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 0,
+            ..Default::default()
+        },
+        db.clone(),
+        None,
+    );
+    let proxy_info = proxy.start().await.expect("start local proxy");
+    let proxy_url = format!("http://127.0.0.1:{}/v1/responses", proxy_info.port);
+    let client = Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build local-only client");
+
+    for (session_id, _, expected_status) in scenarios {
+        let (status, _) = post_raw_response(
+            &client,
+            &proxy_url,
+            session_id,
+            json!({
+                "model": "gpt-local-fixture",
+                "stream": false,
+                "input": "pinned failure must not fall back"
+            }),
+        )
+        .await;
+        assert_eq!(status, expected_status);
+    }
+
+    proxy.stop().await.expect("stop local proxy");
+    upstream.stop();
+
+    assert_eq!(
+        upstream
+            .requests()
+            .iter()
+            .map(|request| request.provider.as_str())
+            .collect::<Vec<_>>(),
+        ["pinned-429", "pinned-500", "pinned-timeout"]
+    );
+    assert_eq!(
+        db.get_current_provider("codex")
+            .expect("read global current provider")
+            .as_deref(),
+        Some("b")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn unreadable_session_routes_fail_closed_with_stable_error() -> Result<(), AppError> {
+    let _home = TempHome::new();
+    let mut upstream = FakeUpstream::start().await;
+    let db = Arc::new(Database::memory().expect("create in-memory database"));
+    db.save_provider("codex", &provider("b", &upstream.base_url))
+        .expect("save local fixture provider");
+    set_current_provider(&db, "b");
+    set_failover(&db, false).await;
+    {
+        let connection = crate::database::lock_conn!(db.conn);
+        connection
+            .execute_batch("DROP TABLE codex_session_routes;")
+            .expect("remove route table for read-failure fixture");
+    }
+
+    let proxy = ProxyServer::new(
+        ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 0,
+            ..Default::default()
+        },
+        db,
+        None,
+    );
+    let proxy_info = proxy.start().await.expect("start local proxy");
+    let proxy_url = format!("http://127.0.0.1:{}/v1/responses", proxy_info.port);
+    let client = Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build local-only client");
+
+    let (status, body) = post_raw_response(
+        &client,
+        &proxy_url,
+        SESSION_ID,
+        json!({"model": "gpt-local-fixture", "stream": false, "input": "hello"}),
+    )
+    .await;
+
+    proxy.stop().await.expect("stop local proxy");
+    upstream.stop();
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "session_provider_unavailable");
+    assert!(upstream.requests().is_empty());
+    Ok(())
 }

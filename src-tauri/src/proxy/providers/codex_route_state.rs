@@ -4,6 +4,7 @@
 //! keeps response headers, partial SSE streams, failures, and cancellations
 //! from changing the provider that owns the session's portable history.
 
+use crate::database::Database;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -15,11 +16,21 @@ struct CodexRouteStateInner {
     session_order: VecDeque<String>,
 }
 
-/// Bounded, process-local record of the last successful provider per session.
-#[derive(Debug)]
+/// Persistent successful-provider ownership with a bounded process-local cache.
 pub struct CodexRouteState {
     max_sessions: usize,
+    db: Option<Arc<Database>>,
     inner: Mutex<CodexRouteStateInner>,
+}
+
+impl std::fmt::Debug for CodexRouteState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexRouteState")
+            .field("max_sessions", &self.max_sessions)
+            .field("persistent", &self.db.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for CodexRouteState {
@@ -36,12 +47,23 @@ pub struct CodexRouteAttempt {
     session_id: String,
     provider_id: String,
     previous_provider_id: Option<String>,
+    force_provider_boundary: bool,
+    persistable: bool,
 }
 
 impl CodexRouteState {
     pub fn with_capacity(max_sessions: usize) -> Self {
         Self {
             max_sessions: max_sessions.max(1),
+            db: None,
+            inner: Mutex::new(CodexRouteStateInner::default()),
+        }
+    }
+
+    pub fn with_database(db: Arc<Database>) -> Self {
+        Self {
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            db: Some(db),
             inner: Mutex::new(CodexRouteStateInner::default()),
         }
     }
@@ -52,15 +74,45 @@ impl CodexRouteState {
         session_id: impl Into<String>,
         provider_id: impl Into<String>,
     ) -> CodexRouteAttempt {
-        let session_id = session_id.into();
+        self.begin_attempt_with_boundary(session_id, provider_id, false)
+    }
+
+    pub fn begin_attempt_with_boundary(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        force_provider_boundary: bool,
+    ) -> CodexRouteAttempt {
+        let original_session_id = session_id.into();
         let provider_id = provider_id.into();
-        let previous_provider_id = self.lookup_and_touch(&session_id);
+        let canonical_session_id = canonical_session_id(&original_session_id);
+        let persistable = canonical_session_id.is_some() && self.db.is_some();
+        let session_id = canonical_session_id.unwrap_or(original_session_id);
+        let previous_provider_id = self
+            .lookup_persistent_provider(&session_id)
+            .or_else(|| self.lookup_and_touch(&session_id));
+        let force_provider_boundary = force_provider_boundary && previous_provider_id.is_none();
 
         CodexRouteAttempt {
             state: self.clone(),
             session_id,
             provider_id,
             previous_provider_id,
+            force_provider_boundary,
+            persistable,
+        }
+    }
+
+    fn lookup_persistent_provider(&self, session_id: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        match db.get_codex_session_route(session_id) {
+            Ok(route) => route.and_then(|route| route.last_successful_provider_id),
+            Err(error) => {
+                log::warn!(
+                    "[CodexRouteState] failed to read persistent route: session={session_id}, error={error}"
+                );
+                None
+            }
         }
     }
 
@@ -100,15 +152,37 @@ impl CodexRouteAttempt {
     }
 
     pub fn is_provider_change(&self) -> bool {
-        self.previous_provider_id
-            .as_deref()
-            .is_some_and(|previous| previous != self.provider_id)
+        self.force_provider_boundary
+            || self
+                .previous_provider_id
+                .as_deref()
+                .is_some_and(|previous| previous != self.provider_id)
     }
 
     /// Commit ownership after the full response has completed successfully.
     pub fn complete_successfully(self) {
+        if self.persistable {
+            if let Some(db) = &self.state.db {
+                if let Err(error) = db
+                    .set_codex_session_last_successful_provider(&self.session_id, &self.provider_id)
+                {
+                    log::error!(
+                        "[CodexRouteState] failed to persist completed route: session={}, provider={}, error={error}",
+                        self.session_id,
+                        self.provider_id
+                    );
+                }
+            }
+        }
         self.state.record_success(self.session_id, self.provider_id);
     }
+}
+
+fn canonical_session_id(session_id: &str) -> Option<String> {
+    let raw = session_id.strip_prefix("codex_").unwrap_or(session_id);
+    uuid::Uuid::parse_str(raw)
+        .ok()
+        .map(|id| id.hyphenated().to_string())
 }
 
 fn touch_session(session_order: &mut VecDeque<String>, session_id: &str) {
@@ -120,6 +194,8 @@ fn touch_session(session_order: &mut VecDeque<String>, session_id: &str) {
 mod tests {
     use super::*;
     use std::thread;
+
+    const SESSION_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     #[test]
     fn first_request_commits_only_after_successful_completion() {
@@ -270,5 +346,39 @@ mod tests {
                 .previous_provider_id(),
             None
         );
+    }
+
+    #[test]
+    fn persistent_route_survives_state_recreation_and_first_pin_is_conservative() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let first_process = Arc::new(CodexRouteState::with_database(db.clone()));
+
+        let first_pin = first_process.begin_attempt_with_boundary(
+            format!("codex_{SESSION_UUID}"),
+            "provider-a",
+            true,
+        );
+        assert!(first_pin.is_provider_change());
+        assert_eq!(first_pin.previous_provider_id(), None);
+        first_pin.complete_successfully();
+
+        assert_eq!(
+            db.get_codex_session_route(SESSION_UUID)
+                .expect("read route")
+                .expect("route should exist")
+                .last_successful_provider_id
+                .as_deref(),
+            Some("provider-a")
+        );
+
+        let restarted_process = Arc::new(CodexRouteState::with_database(db));
+        let same_pin =
+            restarted_process.begin_attempt_with_boundary(SESSION_UUID, "provider-a", true);
+        assert!(!same_pin.is_provider_change());
+        drop(same_pin);
+
+        let repin = restarted_process.begin_attempt_with_boundary(SESSION_UUID, "provider-b", true);
+        assert_eq!(repin.previous_provider_id(), Some("provider-a"));
+        assert!(repin.is_provider_change());
     }
 }

@@ -48,6 +48,9 @@ pub enum ProxyError {
     #[error("portable_handoff_unavailable")]
     PortableHandoffUnavailable,
 
+    #[error("session_provider_unavailable")]
+    SessionProviderUnavailable,
+
     #[error("数据库错误: {0}")]
     DatabaseError(String),
 
@@ -146,6 +149,9 @@ impl IntoResponse for ProxyError {
                     ProxyError::PortableHandoffUnavailable => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
+                    ProxyError::SessionProviderUnavailable => {
+                        (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+                    }
                     ProxyError::DatabaseError(_) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
                     }
@@ -165,12 +171,22 @@ impl IntoResponse for ProxyError {
                     ProxyError::UpstreamError { .. } => unreachable!(),
                 };
 
-                let error_body = json!({
-                    "error": {
-                        "message": message,
-                        "type": "proxy_error",
-                    }
-                });
+                let error_body = if matches!(self, ProxyError::SessionProviderUnavailable) {
+                    json!({
+                        "error": {
+                            "message": message,
+                            "type": "proxy_error",
+                            "code": "session_provider_unavailable",
+                        }
+                    })
+                } else {
+                    json!({
+                        "error": {
+                            "message": message,
+                            "type": "proxy_error",
+                        }
+                    })
+                };
 
                 (http_status, error_body)
             }
@@ -208,5 +224,26 @@ pub fn categorize_error(error: &reqwest::Error) -> ErrorCategory {
         }
     } else {
         ErrorCategory::Retryable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn session_provider_unavailable_response_is_stable_and_fail_closed() {
+        let response = ProxyError::SessionProviderUnavailable.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse response body");
+        assert_eq!(body["error"]["code"], "session_provider_unavailable");
     }
 }

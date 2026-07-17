@@ -545,3 +545,81 @@ Started: 2026-07-17T02:40:00+08:00
   - Validate and canonicalize UUIDs at the DAO boundary, while retaining a schema CHECK so direct SQL and restored backups cannot introduce prefixed or malformed session ids.
   - Keep pin updates and completed-provider ownership updates independent so clearing or repinning a conversation cannot erase handoff history.
 ---
+
+## 2026-07-17 22:48 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-224815-RunProject-33540
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T22:48:16.3293164+08:00
+---
+
+## 2026-07-17 22:48 +08:00 - Execution analysis for Run ID: 20260717-224815-RunProject-33540
+- Subtasks analyzed: 4
+- Parallel batches: 0
+- Batch 1 (serial): US-007/US-007-ST-002
+- Batch 2 (serial): US-007/US-007-ST-003
+- Batch 3 (serial): US-007/US-007-ST-004
+- Batch 4 (serial): US-007/US-007-ST-005
+---
+
+## 2026-07-17 22:48 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-224815-RunProject-33540
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+   M src-tauri/src/proxy/error.rs
+   M src-tauri/src/proxy/error_mapper.rs
+   M src-tauri/src/proxy/forwarder.rs
+   M src-tauri/src/proxy/handler_context.rs
+   M src-tauri/src/proxy/handlers.rs
+   M src-tauri/src/proxy/provider_router.rs
+   M src-tauri/src/proxy/providers/codex_route_state.rs
+   M src-tauri/src/proxy/server.rs
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 23:14 +08:00 - US-007-ST-002
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Resolved a Codex session pin before global provider selection and snapshotted exactly one pinned provider for the request.
+  - Made pinned requests bypass circuit state, global failover candidates, global current-provider updates, tray switching, and failover counters.
+  - Added stable HTTP 503 `session_provider_unavailable` handling for unreadable route rows and missing or unreadable pinned providers.
+  - Persisted the last fully successful provider and used it after proxy restart for provider-boundary sanitization; the first explicit pin with unknown ownership is handled as a boundary.
+  - Added local fake-upstream coverage proving pinned 429, 500, and timeout failures never reach the global fallback.
+- Files changed
+  - `src-tauri/src/proxy/error.rs`
+  - `src-tauri/src/proxy/error_mapper.rs`
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `src-tauri/src/proxy/provider_router.rs`
+  - `src-tauri/src/proxy/providers/codex_route_state.rs`
+  - `src-tauri/src/proxy/server.rs`
+  - `src-tauri/src/proxy/tests/codex_portable_handoff.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Pinned routing unit tests: passed, 2 passed / 0 failed.
+  - Pinned retryable-failure local proxy fixture: passed, 1 passed / 0 failed.
+  - Unreadable route-table fail-closed fixture: passed, 1 passed / 0 failed.
+  - Full proxy regression: passed, 969 passed / 0 failed.
+  - Full Rust library suite: passed, 1801 passed / 0 failed / 2 ignored.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: corrected the stale process-local route-state comment; final guard pass clean.
+  - `test-guard`: clean; fake HTTP upstreams are boundary doubles and assertions cover observable routing, status codes, and persisted state.
+- Browser verification result: not applicable; this subtask changes proxy routing only.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Resolve a pin before global queue selection so a request owns an immutable provider snapshot.
+  - Route-table read failures are safety failures, not ordinary database errors, because silently falling back could consume another provider.
+  - A pinned request may update that provider's health but must not update the global current provider or invoke the failover switch manager.
+---

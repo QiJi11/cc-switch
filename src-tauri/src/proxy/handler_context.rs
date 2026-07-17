@@ -64,6 +64,8 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    /// Whether this request is pinned to one Codex provider.
+    pub session_provider_pinned: bool,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -129,19 +131,48 @@ impl RequestContext {
             session_result.client_provided
         );
 
-        // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
-        // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
-            .provider_router
-            .select_providers(app_type_str)
-            .await
-            .map_err(|e| match e {
-                crate::error::AppError::AllProvidersCircuitOpen => {
-                    ProxyError::AllProvidersCircuitOpen
-                }
-                crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
-                _ => ProxyError::DatabaseError(e.to_string()),
-            })?;
+        let pinned_provider_id = load_codex_session_pin(
+            state,
+            &app_type,
+            &session_id,
+            session_result.client_provided,
+        )?;
+        let session_provider_pinned = pinned_provider_id.is_some();
+
+        // Resolve a pin before global selection so the request gets one immutable route snapshot.
+        let providers = if let Some(provider_id) = pinned_provider_id {
+            let provider = state
+                .provider_router
+                .select_pinned_provider(app_type_str, &provider_id)
+                .map_err(|error| {
+                    log::warn!(
+                        "[{tag}] pinned session provider is unreadable: provider_id={provider_id}, error={error}"
+                    );
+                    ProxyError::SessionProviderUnavailable
+                })?
+                .ok_or_else(|| {
+                    log::warn!(
+                        "[{tag}] pinned session provider is missing: provider_id={provider_id}"
+                    );
+                    ProxyError::SessionProviderUnavailable
+                })?;
+            vec![provider]
+        } else {
+            // Call global selection once; the result is reused by the forwarder.
+            state
+                .provider_router
+                .select_providers(app_type_str)
+                .await
+                .map_err(|e| match e {
+                    crate::error::AppError::AllProvidersCircuitOpen => {
+                        ProxyError::AllProvidersCircuitOpen
+                    }
+                    crate::error::AppError::NoProvidersConfigured => {
+                        ProxyError::NoProvidersConfigured
+                    }
+                    _ => ProxyError::DatabaseError(e.to_string()),
+                })?
+        };
 
         let provider = providers
             .first()
@@ -170,6 +201,7 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            session_provider_pinned,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -220,7 +252,9 @@ impl RequestContext {
             };
 
         // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
-        let max_retries = if self.app_config.auto_failover_enabled {
+        let max_retries = if self.session_provider_pinned {
+            0
+        } else if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {
             0
@@ -239,6 +273,7 @@ impl RequestContext {
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
+            self.session_provider_pinned,
             codex_portable_handoff_on_provider_change,
             first_byte_timeout,
             idle_timeout,
@@ -283,6 +318,33 @@ impl RequestContext {
             }
         }
     }
+}
+
+fn load_codex_session_pin(
+    state: &ProxyState,
+    app_type: &AppType,
+    session_id: &str,
+    session_client_provided: bool,
+) -> Result<Option<String>, ProxyError> {
+    if !matches!(app_type, AppType::Codex) || !session_client_provided {
+        return Ok(None);
+    }
+
+    let route_session_id = session_id.strip_prefix("codex_").unwrap_or(session_id);
+    if uuid::Uuid::parse_str(route_session_id).is_err() {
+        return Ok(None);
+    }
+
+    state
+        .db
+        .get_codex_session_route(route_session_id)
+        .map(|route| route.and_then(|route| route.pinned_provider_id))
+        .map_err(|error| {
+            log::warn!(
+                "[Codex] failed to read session provider route: session={route_session_id}, error={error}"
+            );
+            ProxyError::SessionProviderUnavailable
+        })
 }
 
 /// Pull the Gemini model name out of an API path.

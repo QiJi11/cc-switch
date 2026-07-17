@@ -46,6 +46,9 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         // 安全的本地可见历史无法构建：503 Service Unavailable
         ProxyError::PortableHandoffUnavailable => 503,
 
+        // 会话固定的 Provider 缺失或配置不可读：必须失败关闭，不能回退全局队列。
+        ProxyError::SessionProviderUnavailable => 503,
+
         // Provider 不健康：503 Service Unavailable
         ProxyError::ProviderUnhealthy(_) => 503,
 
@@ -85,6 +88,7 @@ pub fn get_error_message(error: &ProxyError) -> String {
         ProxyError::PortableHandoffUnavailable => {
             "无法安全构建跨 Provider 的可见会话上下文".to_string()
         }
+        ProxyError::SessionProviderUnavailable => "会话固定的 Provider 不可用".to_string(),
         ProxyError::ProviderUnhealthy(msg) => format!("Provider 不健康: {msg}"),
         ProxyError::DatabaseError(msg) => format!("数据库错误: {msg}"),
         ProxyError::TransformError(msg) => format!("请求/响应转换错误: {msg}"),
@@ -147,6 +151,10 @@ mod tests {
         );
         assert_eq!(
             map_proxy_error_to_status(&ProxyError::PortableHandoffUnavailable),
+            503
+        );
+        assert_eq!(
+            map_proxy_error_to_status(&ProxyError::SessionProviderUnavailable),
             503
         );
     }

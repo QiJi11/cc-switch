@@ -464,8 +464,8 @@
             "An explicit first pin with unknown ownership is handled conservatively as a provider boundary"
           ],
           "priority": 13,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Pinned Codex sessions now resolve one provider before global routing, bypass circuit state, never fail over, preserve global provider/tray state, persist completed ownership, and fail closed with a stable 503 when route or provider lookup is unavailable.",
           "dependsOn": [
             "US-007-ST-001"
           ],
@@ -602,5 +602,5 @@
       ]
     }
   ],
-  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T17:05:13.8107947+08:00."
+  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T22:48:16.7610764+08:00."
 }
