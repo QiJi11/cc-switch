@@ -448,3 +448,14 @@ Started: 2026-07-17T02:40:00+08:00
   - Failover queue priority follows provider `sort_index`, not insertion order.
   - Verify the persisted current provider after an application restart instead of inferring it from the enabled failover toggle.
 ---
+
+## 2026-07-17 09:24 +08:00 - US-006-ST-002 follow-up verification
+- Repaired one test fixture to request an OS-assigned ephemeral proxy port instead of colliding with the running installed CC Switch on port 15721.
+- Focused port-isolation regression: passed, 1 passed / 0 failed.
+- Full Rust verification: passed; library summary `1786 passed / 0 failed / 2 ignored`, and every integration-test target passed.
+- Final artifact hashes were re-read and remain unchanged:
+  - EXE: `19CD90583CEBED6A1F70A2B392E5B039663559487FEAF5A35DB4CAE88ADAD138`.
+  - NSIS: `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`.
+- Read-only installation audit found `C:\Programs\CC Switch\cc-switch.exe` already matches the final EXE hash. The original deferred-install assumption therefore no longer holds; no rollback or further replacement was performed during this follow-up.
+- NSIS-only bundling succeeded with updater artifact generation disabled. MSI/WiX, updater signing, and Tauri bundle-type patching remain unverified.
+---

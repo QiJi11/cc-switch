@@ -339,7 +339,7 @@
       "description": "As the operator, I need the portable handoff setting to control runtime transcript reconstruction while provider-bound state remains safely sanitized.",
       "priority": 10,
       "passes": true,
-      "notes": "The runtime setting is wired per request, full proxy and TypeScript checks pass, and refreshed Windows EXE/NSIS artifacts were generated with recorded SHA-256 values.",
+      "notes": "The runtime setting is wired per request; TypeScript, the full Rust suite, proxy regressions, formatting, and diff checks pass; refreshed Windows EXE/NSIS artifacts were generated with recorded SHA-256 values.",
       "subtasks": [
         {
           "id": "US-006-ST-001",
@@ -388,7 +388,7 @@
           ],
           "priority": 11,
           "passes": true,
-          "notes": "Updated deployment semantics, passed TypeScript/proxy/format/diff checks, regenerated the Windows release and NSIS bundle, and recorded SHA-256 values. MSI remains unverified because WiX was unavailable.",
+          "notes": "Updated deployment semantics, passed TypeScript/full Rust/proxy/format/diff checks, regenerated the Windows release and NSIS bundle, and recorded SHA-256 values. MSI/WiX and updater signing remain unverified.",
           "dependsOn": [
             "US-006-ST-001"
           ],
