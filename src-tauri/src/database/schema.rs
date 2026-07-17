@@ -310,6 +310,11 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 20. Codex conversation provider routes. Provider ids intentionally have no
+        // foreign key: deleting a provider clears only the pin and preserves the
+        // last-success marker needed for the next portable handoff.
+        Self::create_codex_session_routes_table(conn)?;
+
         // 修复跑过未发布开发版的库：current 标记曾是全局 key，现按应用分组
         // （随 v12 定稿为 current_profile_id_<scope>，不单独 bump 版本）
         if conn
@@ -477,6 +482,11 @@ impl Database {
                         log::info!("迁移数据库从 v11 到 v12（添加项目 Profiles 表）");
                         Self::migrate_v11_to_v12(conn)?;
                         Self::set_user_version(conn, 12)?;
+                    }
+                    12 => {
+                        log::info!("迁移数据库从 v12 到 v13（添加 Codex 会话供应商路由表）");
+                        Self::migrate_v12_to_v13(conn)?;
+                        Self::set_user_version(conn, 13)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1319,6 +1329,39 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(format!("v11 -> v12 创建 profiles 表失败: {e}")))?;
+        Ok(())
+    }
+
+    /// v12 -> v13 migration: persist per-conversation Codex provider routes.
+    fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+        Self::create_codex_session_routes_table(conn).map_err(|e| {
+            AppError::Database(format!("v12 -> v13 创建 codex_session_routes 表失败: {e}"))
+        })
+    }
+
+    fn create_codex_session_routes_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_session_routes (
+                session_id TEXT NOT NULL PRIMARY KEY
+                    CHECK (
+                        length(session_id) = 36
+                        AND session_id = lower(session_id)
+                        AND substr(session_id, 9, 1) = '-'
+                        AND substr(session_id, 14, 1) = '-'
+                        AND substr(session_id, 19, 1) = '-'
+                        AND substr(session_id, 24, 1) = '-'
+                        AND length(replace(session_id, '-', '')) = 32
+                        AND session_id NOT GLOB '*[^0-9a-f-]*'
+                    ),
+                pinned_provider_id TEXT,
+                last_successful_provider_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_codex_session_routes_pinned_provider
+                ON codex_session_routes(pinned_provider_id);",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 

@@ -2,6 +2,27 @@
 Started: 2026-07-17T02:40:00+08:00
 ---
 
+## 2026-07-17 - Execution brief for US-007
+- Project: cc-switch-fork-work
+- User goal: allow multiple Codex App conversations to run concurrently on independently selected providers, with manual repinning and portable history handoff.
+- Assumptions:
+  - The selector lives only in the existing Session Manager detail header; route settings gain no new surface.
+  - A pinned session never automatically consumes another provider after 429, timeout, or upstream failure.
+  - Unpinned sessions preserve the existing global routing and optional failover behavior.
+  - Pin changes affect the next request; an in-flight request keeps its route snapshot.
+  - Codex App keeps one conversation HOME and CLI run-scoped HOMEs stay isolated.
+  - No paid provider request or replacement of the running CC Switch installation is authorized.
+- Story list:
+  - `US-007-ST-001`: schema v13 and persistent Codex session-route DAO.
+  - `US-007-ST-002`: pinned proxy routing, persistent last-success ownership, and fail-closed errors.
+  - `US-007-ST-003`: Tauri commands, SessionMeta fields, API types, and deletion cleanup.
+  - `US-007-ST-004`: Session Manager provider selector, badges, query mutation, and i18n.
+  - `US-007-ST-005`: three-session local fixture, full checks, documentation, release, NSIS, and hashes.
+- Acceptance checks: three concurrent sessions use three providers without global mutation; manual repin safely hands off history; pinned failures do not fall back; restart persistence, UI behavior, full tests, and release artifacts pass.
+- Max iterations: 10.
+- Mode: dirty continuation on `qiji/local-codex-post-switch-runner`; no branch switch and no parallel writers.
+---
+
 ## 2026-07-17 - Execution brief for US-006
 - Project: cc-switch-fork-work
 - User goal: wire `codexPortableHandoffOnProviderChange` into the request path and regenerate verified Windows release artifacts.
@@ -41,6 +62,7 @@ Started: 2026-07-17T02:40:00+08:00
 - Codex HTTP session extraction namespaces client UUIDs as `codex_<uuid>`; strip only that internal prefix before strict UUID validation and exact rollout lookup.
 - For backward-compatible default-on settings, pair Rust `#[serde(default = "default_true")]` with the same `true` default in `AppSettings::default` and every frontend form initialization/reset baseline; preserve explicit `false` with nullish fallback rather than truthiness checks.
 - The standalone Vite renderer cannot populate settings without Tauri `invoke`; browser-check settings components with a temporary harness that mounts the real component, i18n resources, and project styles, then remove the harness before committing.
+- Store Codex conversation routes under canonical raw UUIDs (lowercase, hyphenated, without the internal `codex_` prefix). Provider cleanup clears only matching pins and preserves last-success ownership; successful session deletion removes the whole route row.
 ---
 
 ## 2026-07-17 03:06 +08:00 - Ralph session
@@ -458,4 +480,68 @@ Started: 2026-07-17T02:40:00+08:00
   - NSIS: `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`.
 - Read-only installation audit found `C:\Programs\CC Switch\cc-switch.exe` already matches the final EXE hash. The original deferred-install assumption therefore no longer holds; no rollback or further replacement was performed during this follow-up.
 - NSIS-only bundling succeeded with updater artifact generation disabled. MSI/WiX, updater signing, and Tauri bundle-type patching remain unverified.
+---
+
+## 2026-07-17 17:05 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-170513-RunProject-26972
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T17:05:13.6109165+08:00
+---
+
+## 2026-07-17 17:05 +08:00 - Execution analysis for Run ID: 20260717-170513-RunProject-26972
+- Subtasks analyzed: 5
+- Parallel batches: 0
+- Batch 1 (serial): US-007/US-007-ST-001
+- Batch 2 (serial): US-007/US-007-ST-002
+- Batch 3 (serial): US-007/US-007-ST-003
+- Batch 4 (serial): US-007/US-007-ST-004
+- Batch 5 (serial): US-007/US-007-ST-005
+---
+
+## 2026-07-17 17:05 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-170513-RunProject-26972
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+   ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 17:15 +08:00 - US-007-ST-001
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Raised the database schema to v13 and added `codex_session_routes` with canonical raw UUID primary keys, nullable pin and last-success provider fields, timestamps, and a pin lookup index.
+  - Added DAO operations to read routes, independently upsert or clear pins, record the last successful provider, clear pins for a deleted provider, and delete a session route.
+  - Kept provider ids free of foreign keys so provider-pin cleanup preserves the last-success marker needed for a safe next handoff.
+  - Added fresh-schema, v12-to-v13, SQL backup restore, CRUD, canonicalization, malformed-id, provider cleanup, and session cleanup coverage.
+- Files changed
+  - `src-tauri/src/database/mod.rs`
+  - `src-tauri/src/database/schema.rs`
+  - `src-tauri/src/database/dao/codex_session_routes.rs`
+  - `src-tauri/src/database/dao/mod.rs`
+  - `src-tauri/src/database/tests.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Focused Codex session-route tests: passed, 6 passed / 0 failed.
+  - Database module regression: passed, 42 passed / 0 failed.
+  - Full Rust library suite: passed, 1792 passed / 0 failed / 2 ignored.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: split pin set/clear into explicit commands and hardened the schema against NULL or non-canonical direct SQL keys; final guard pass clean.
+  - `test-guard`: clean; tests use real SQLite schemas and backup import paths with distinct behavioral scenarios and no mocks.
+- Browser verification result: not applicable; this subtask changes only Rust database schema and persistence behavior.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - SQLite non-integer primary keys need an explicit `NOT NULL` when the schema must reject NULL keys.
+  - Validate and canonicalize UUIDs at the DAO boundary, while retaining a schema CHECK so direct SQL and restored backups cannot introduce prefixed or malformed session ids.
+  - Keep pin updates and completed-provider ownership updates independent so clearing or repinning a conversation cannot erase handoff history.
 ---

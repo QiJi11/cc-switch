@@ -407,7 +407,200 @@
           "sourceStoryId": "US-006"
         }
       ]
+    },
+    {
+      "id": "US-007",
+      "title": "Pin Codex providers per conversation",
+      "description": "As a Codex App user, I need different conversations to stay on independently selected providers so multiple quotas can run concurrently without global route changes.",
+      "priority": 12,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-007-ST-001",
+          "title": "Persist conversation provider routes",
+          "description": "Add schema v13 and database access for a canonical Codex session route containing an optional pin and the last successful provider.",
+          "acceptanceCriteria": [
+            "Schema v13 creates codex_session_routes with canonical raw UUID keys, nullable pinned provider, nullable last-success provider, and timestamps",
+            "v12-to-v13, fresh database, backup restore, route upsert/read/clear, provider deletion, and session deletion behaviors are covered",
+            "Clearing or deleting a pin preserves the last-success provider marker for the next safe handoff",
+            "Malformed or non-UUID Codex session ids are rejected without writing a route"
+          ],
+          "priority": 12,
+          "passes": true,
+          "notes": "Added schema v13 and a canonical-UUID Codex session-route DAO with independent pin/last-success updates, provider-pin cleanup, session cleanup, SQL backup restore coverage, and strict malformed-id rejection.",
+          "dependsOn": [
+            "US-006-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/database/mod.rs",
+            "src-tauri/src/database/schema.rs",
+            "src-tauri/src/database/dao/codex_session_routes.rs",
+            "src-tauri/src/database/dao/mod.rs",
+            "src-tauri/src/database/tests.rs"
+          ],
+          "touches": [
+            "database/schema",
+            "database/codex-session-routes"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 5,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-002",
+          "title": "Route pinned conversations independently",
+          "description": "Resolve an optional session pin before provider selection and persist successful route ownership without mutating the global provider.",
+          "acceptanceCriteria": [
+            "A pinned Codex session selects exactly its pinned provider regardless of the global failover queue, while an unpinned session preserves existing routing",
+            "Pinned 429, timeout, and upstream errors never attempt another provider",
+            "Pinned successes do not update global current-provider settings, tray state, or other sessions",
+            "Missing or unreadable pinned providers fail closed with HTTP 503 and stable code session_provider_unavailable",
+            "Last successful provider survives proxy restart and drives the existing portable handoff sanitizer and transcript behavior",
+            "An explicit first pin with unknown ownership is handled conservatively as a provider boundary"
+          ],
+          "priority": 13,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-007-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/provider_router.rs",
+            "src-tauri/src/proxy/handler_context.rs",
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/providers/codex_route_state.rs",
+            "src-tauri/src/proxy/error.rs",
+            "src-tauri/src/proxy/handlers.rs",
+            "src-tauri/src/proxy/response_processor.rs"
+          ],
+          "touches": [
+            "proxy/provider-selection",
+            "proxy/codex-handoff",
+            "proxy/global-provider-sync"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 7,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-003",
+          "title": "Expose conversation route commands",
+          "description": "Return route metadata with Codex sessions and add a validated command to set or clear a conversation pin.",
+          "acceptanceCriteria": [
+            "SessionMeta exposes pinnedProviderId and lastSuccessfulProviderId for Codex sessions",
+            "set_codex_session_provider validates the session UUID and selected Codex provider before saving, and null clears only the pin",
+            "Successful local session deletion removes its route row",
+            "Deleting a Codex provider clears matching pins without discarding last-success ownership",
+            "Tauri command registration and TypeScript API types compile"
+          ],
+          "priority": 14,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-007-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/commands/session_manager.rs",
+            "src-tauri/src/session_manager/mod.rs",
+            "src-tauri/src/services/provider/mod.rs",
+            "src-tauri/src/lib.rs",
+            "src/types.ts",
+            "src/lib/api/sessions.ts"
+          ],
+          "touches": [
+            "tauri/session-commands",
+            "provider/delete-cleanup",
+            "frontend/session-api"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 6,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-004",
+          "title": "Add the conversation provider selector",
+          "description": "Let users set a Codex conversation pin from the existing session manager and see its route in the list.",
+          "acceptanceCriteria": [
+            "Selected Codex conversations show a provider select before the existing action buttons; non-Codex sessions do not",
+            "The select contains Follow global routing plus every configured Codex provider with advisory health state",
+            "Saving immediately updates the session query and states that the next request changes while an in-flight request is unaffected",
+            "Session rows show a Global badge or the pinned provider name",
+            "Chinese and English strings are complete, TypeScript passes, and the layout is verified in the in-app browser"
+          ],
+          "priority": 15,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-007-ST-003"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src/components/sessions/SessionManagerPage.tsx",
+            "src/components/sessions/SessionItem.tsx",
+            "src/lib/query/queries.ts",
+            "src/i18n/locales/zh.json",
+            "src/i18n/locales/en.json"
+          ],
+          "touches": [
+            "ui/session-manager",
+            "frontend/session-query",
+            "i18n"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 5,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-005",
+          "title": "Verify concurrent routes and rebuild Windows artifacts",
+          "description": "Exercise independent pinned sessions with local upstreams, document behavior, and produce final Windows artifacts without installing them.",
+          "acceptanceCriteria": [
+            "A local fixture runs three distinct Codex sessions concurrently against three pinned providers and proves no global provider mutation",
+            "The fixture covers manual A-to-B repinning, pinned 429 without fallback, restart persistence, unpinning, tool deduplication, and log secrecy",
+            "TypeScript, full Rust, formatting, diff, direct Vite, Rust release, and NSIS-only bundle checks pass",
+            "Fresh EXE and NSIS SHA-256 values and deployment semantics are documented",
+            "No paid request is sent, Codex App and CLI HOME behavior is unchanged, and the running installation is not replaced"
+          ],
+          "priority": 16,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-007-ST-004"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/tests/codex_portable_handoff.rs",
+            "docs/codex-portable-provider-handoff.md",
+            "scripts/ralph/progress.txt"
+          ],
+          "touches": [
+            "proxy/integration-tests",
+            "docs/deployment",
+            "release/windows"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        }
+      ]
     }
   ],
-  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T06:59:35.6728934+08:00."
+  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T17:05:13.8107947+08:00."
 }
