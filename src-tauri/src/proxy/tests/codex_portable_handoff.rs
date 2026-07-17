@@ -31,6 +31,9 @@ use crate::{
 };
 
 const SESSION_ID: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b18";
+const PINNED_SESSION_A: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b20";
+const PINNED_SESSION_B: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b21";
+const PINNED_SESSION_C: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b22";
 const ENCRYPTED_SECRET: &str = "opaque-provider-a-secret-never-log";
 const TRANSCRIPT_SECRET: &str = "sk-transcript-secretvalue-never-log";
 const TRANSCRIPT_BODY: &str = "portable-visible-transcript-body-never-log";
@@ -235,6 +238,13 @@ async fn handle_fake_response(
         ("b", 0) => success_response("resp_b_1", "assistant-b", true),
         ("b", 1) => success_response("resp_b_2", "assistant-b-after-failover", false),
         ("c", 0) => success_response("resp_c_1", "assistant-c", false),
+        (provider_id, provider_call_index) if provider_id.starts_with("session-") => {
+            success_response(
+                &format!("resp_{provider_id}_{provider_call_index}"),
+                &format!("assistant-{provider_id}-{provider_call_index}"),
+                false,
+            )
+        }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"message": "unexpected local fixture request"}})),
@@ -337,6 +347,35 @@ fn write_rollout_fixture(home: &Path) {
         .join("\n")
         + "\n";
     std::fs::write(path, contents).expect("write rollout fixture");
+}
+
+fn write_session_rollout_fixture(home: &Path, session_id: &str) {
+    let directory = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("18");
+    std::fs::create_dir_all(&directory).expect("create pinned-session rollout directory");
+    let path = directory.join(format!("rollout-2026-07-18T00-00-00-{session_id}.jsonl"));
+    let records = [
+        json!({
+            "timestamp": "2026-07-18T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": "C:/pinned-session-fixture"}
+        }),
+        json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": session_id}
+        }),
+    ];
+    let contents = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("serialize pinned-session rollout"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(path, contents).expect("write pinned-session rollout");
 }
 
 async fn set_failover(db: &Database, enabled: bool) {
@@ -587,6 +626,166 @@ async fn three_provider_handoff_stays_local_and_does_not_duplicate_output_or_log
             "sensitive fixture data leaked: {excluded}"
         );
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn concurrent_pins_survive_restart_repin_and_unpin_without_mutating_global_route() {
+    let home = TempHome::new();
+    for session_id in [PINNED_SESSION_A, PINNED_SESSION_B, PINNED_SESSION_C] {
+        write_session_rollout_fixture(home.path(), session_id);
+    }
+
+    let mut upstream = FakeUpstream::start().await;
+    let db = Arc::new(Database::memory().expect("create in-memory database"));
+    for provider_id in ["session-a", "session-b", "session-c"] {
+        db.save_provider("codex", &provider(provider_id, &upstream.base_url))
+            .expect("save pinned-session provider");
+    }
+    set_current_provider(&db, "session-a");
+    set_failover(&db, false).await;
+    for (session_id, provider_id) in [
+        (PINNED_SESSION_A, "session-a"),
+        (PINNED_SESSION_B, "session-b"),
+        (PINNED_SESSION_C, "session-c"),
+    ] {
+        db.set_codex_session_pin(session_id, provider_id)
+            .expect("pin concurrent session");
+    }
+
+    let proxy = ProxyServer::new(
+        ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 0,
+            ..Default::default()
+        },
+        db.clone(),
+        None,
+    );
+    let proxy_info = proxy.start().await.expect("start first local proxy");
+    let proxy_url = format!("http://127.0.0.1:{}/v1/responses", proxy_info.port);
+    let client = Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build local-only client");
+
+    let body = || json!({"model": "gpt-local-fixture", "stream": false, "input": "hello"});
+    let (response_a, response_b, response_c) = tokio::join!(
+        post_raw_response(&client, &proxy_url, PINNED_SESSION_A, body()),
+        post_raw_response(&client, &proxy_url, PINNED_SESSION_B, body()),
+        post_raw_response(&client, &proxy_url, PINNED_SESSION_C, body()),
+    );
+    for (status, response_body) in [response_a, response_b, response_c] {
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response: {response_body}"
+        );
+    }
+    proxy.stop().await.expect("stop first local proxy");
+
+    let initial_routes = upstream
+        .requests()
+        .into_iter()
+        .map(|request| {
+            (
+                session_header(&request)
+                    .expect("captured session header")
+                    .to_string(),
+                request.provider,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(initial_routes.len(), 3);
+    assert_eq!(initial_routes[PINNED_SESSION_A], "session-a");
+    assert_eq!(initial_routes[PINNED_SESSION_B], "session-b");
+    assert_eq!(initial_routes[PINNED_SESSION_C], "session-c");
+    assert_eq!(
+        db.get_current_provider("codex")
+            .expect("read unchanged global provider")
+            .as_deref(),
+        Some("session-a")
+    );
+
+    db.set_codex_session_pin(PINNED_SESSION_A, "session-b")
+        .expect("repin session A while proxy is stopped");
+    let restarted_proxy = ProxyServer::new(
+        ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 0,
+            ..Default::default()
+        },
+        db.clone(),
+        None,
+    );
+    let restarted_info = restarted_proxy.start().await.expect("restart local proxy");
+    let restarted_url = format!("http://127.0.0.1:{}/v1/responses", restarted_info.port);
+    let (repin_status, repin_body) =
+        post_raw_response(&client, &restarted_url, PINNED_SESSION_A, body()).await;
+    assert_eq!(
+        repin_status,
+        StatusCode::OK,
+        "unexpected response: {repin_body}"
+    );
+    assert_eq!(
+        db.get_current_provider("codex")
+            .expect("read global provider after repin")
+            .as_deref(),
+        Some("session-a")
+    );
+
+    db.clear_codex_session_pin(PINNED_SESSION_B)
+        .expect("unpin session B");
+    set_current_provider(&db, "session-c");
+    let (unpin_status, unpin_body) =
+        post_raw_response(&client, &restarted_url, PINNED_SESSION_B, body()).await;
+    assert_eq!(
+        unpin_status,
+        StatusCode::OK,
+        "unexpected response: {unpin_body}"
+    );
+    restarted_proxy
+        .stop()
+        .await
+        .expect("stop restarted local proxy");
+    upstream.stop();
+
+    let requests = upstream.requests();
+    let providers_for = |session_id| {
+        requests
+            .iter()
+            .filter(|request| session_header(request) == Some(session_id))
+            .map(|request| request.provider.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(providers_for(PINNED_SESSION_A), ["session-a", "session-b"]);
+    assert_eq!(providers_for(PINNED_SESSION_B), ["session-b", "session-c"]);
+    assert_eq!(providers_for(PINNED_SESSION_C), ["session-c"]);
+
+    let route_a = db
+        .get_codex_session_route(PINNED_SESSION_A)
+        .expect("read session A route")
+        .expect("session A route exists");
+    assert_eq!(route_a.pinned_provider_id.as_deref(), Some("session-b"));
+    assert_eq!(
+        route_a.last_successful_provider_id.as_deref(),
+        Some("session-b")
+    );
+    let route_b = db
+        .get_codex_session_route(PINNED_SESSION_B)
+        .expect("read session B route")
+        .expect("session B route exists");
+    assert_eq!(route_b.pinned_provider_id, None);
+    assert_eq!(
+        route_b.last_successful_provider_id.as_deref(),
+        Some("session-c")
+    );
+    assert_eq!(
+        db.get_current_provider("codex")
+            .expect("read final global provider")
+            .as_deref(),
+        Some("session-c")
+    );
 }
 
 #[tokio::test]
