@@ -1,6 +1,7 @@
 import { ChevronRight, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
   TooltipContent,
@@ -25,6 +26,7 @@ interface SessionItemProps {
   isChecked: boolean;
   isCheckDisabled?: boolean;
   searchQuery?: string;
+  routeLabel?: string;
   onSelect: (key: string) => void;
   onToggleChecked: (checked: boolean) => void;
 }
@@ -36,6 +38,7 @@ export function SessionItem({
   isChecked,
   isCheckDisabled = false,
   searchQuery,
+  routeLabel,
   onSelect,
   onToggleChecked,
 }: SessionItemProps) {
@@ -96,13 +99,22 @@ export function SessionItem({
           />
         </div>
 
-        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <Clock className="size-3" />
           <span>
             {lastActive
               ? formatRelativeTime(lastActive, t)
               : t("common.unknown")}
           </span>
+          {routeLabel && (
+            <Badge
+              variant="outline"
+              className="ml-auto max-w-[9rem] truncate px-1.5 py-0 text-[10px] font-normal"
+              title={routeLabel}
+            >
+              {routeLabel}
+            </Badge>
+          )}
         </div>
       </button>
     </div>

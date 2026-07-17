@@ -457,8 +457,8 @@ export interface SessionMeta {
   lastActiveAt?: number;
   sourcePath?: string;
   resumeCommand?: string;
-  pinnedProviderId?: string;
-  lastSuccessfulProviderId?: string;
+  pinnedProviderId?: string | null;
+  lastSuccessfulProviderId?: string | null;
 }
 
 export interface SessionMessage {

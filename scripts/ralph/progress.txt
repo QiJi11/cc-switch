@@ -659,3 +659,46 @@ Started: 2026-07-17T02:40:00+08:00
   - Canonicalize scanned UUIDs before joining them to database keys.
   - Provider deletion must clear pins in the same transaction as deleting the provider.
 ---
+
+## 2026-07-18 04:12 +08:00 - US-007-ST-004
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Added a Codex-only provider selector to the selected-session header before the delete action.
+  - Added Follow global routing plus every configured Codex provider and its advisory health state.
+  - Added Global or pinned-provider badges to Codex session rows.
+  - Saved route changes through the existing Tauri command, refreshed session data immediately, and showed that the next request changes while the current request is unaffected.
+  - Added Simplified Chinese, Traditional Chinese, English, and Japanese strings.
+- Files changed
+  - `src/components/sessions/CodexSessionProviderSelect.tsx`
+  - `src/components/sessions/SessionManagerPage.tsx`
+  - `src/components/sessions/SessionItem.tsx`
+  - `src/lib/query/mutations.ts`
+  - `src/types.ts`
+  - `src/i18n/locales/zh.json`
+  - `src/i18n/locales/zh-TW.json`
+  - `src/i18n/locales/en.json`
+  - `src/i18n/locales/ja.json`
+  - `tests/components/SessionManagerPage.test.tsx`
+  - `tests/msw/handlers.ts`
+  - `tests/msw/state.ts`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Session Manager component tests: passed, 17 passed / 0 failed.
+  - Full frontend suite with `--testTimeout=20000`: passed, 408 passed / 0 failed.
+  - Repository default 5-second timeout: 404 passed / 4 timed out in the existing App integration file; the same 4 tests passed with the explicit 20-second timeout.
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Prettier check: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: removed blocking query invalidation from the success path and kept route errors visible; final guard pass clean.
+  - `test-guard`: replaced internal API spying with the existing MSW Tauri boundary and asserted observable UI state; final guard pass clean.
+- Browser verification result
+  - Passed at 1440x900 with three local fake providers: no selector/delete or selector/title overlap, no horizontal overflow, health states rendered, and no page errors.
+  - Screenshot: `C:/Users/tianh/.codex/visualizations/2026/07/16/019f6d0d-8659-7331-b242-15274a2b861d/codex-session-provider-routing.png`.
+- Final deliverables:
+  - Browser screenshot listed above.
+- **Learnings for future iterations:**
+  - Keep health status advisory in the selector because an explicit pin is still allowed to try a circuit-open provider.
+  - Update the session cache after the command succeeds so the selected route and list badge move together.
+  - The existing App integration test needs a larger timeout on this Windows host; its assertions are valid and pass at 20 seconds.
+---

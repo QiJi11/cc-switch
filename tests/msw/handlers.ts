@@ -21,6 +21,7 @@ import {
   setAppConfigDirOverrideState,
   getMcpConfig,
   setMcpServerEnabled,
+  setCodexSessionProvider,
   upsertMcpServer,
   deleteMcpServer,
 } from "./state";
@@ -143,6 +144,17 @@ export const handlers = [
     }>(request);
     return success(deleteSession(providerId, sessionId, sourcePath));
   }),
+
+  http.post(
+    `${TAURI_ENDPOINT}/set_codex_session_provider`,
+    async ({ request }) => {
+      const { sessionId, providerId } = await withJson<{
+        sessionId: string;
+        providerId: string | null;
+      }>(request);
+      return success(setCodexSessionProvider(sessionId, providerId));
+    },
+  ),
 
   http.post(`${TAURI_ENDPOINT}/delete_sessions`, async ({ request }) => {
     const { items = [] } = await withJson<{
