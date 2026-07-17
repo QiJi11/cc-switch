@@ -578,8 +578,8 @@
             "No paid request is sent, Codex App and CLI HOME behavior is unchanged, and the running installation is not replaced"
           ],
           "priority": 16,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Clean-worktree verification passed: three pinned sessions routed independently, restart repin and unpin behavior passed, frontend 408/408 and Rust 1806/0/2 plus all integration targets passed, direct Vite and Rust release builds passed, and NSIS was rebuilt without updater artifacts. Final SHA-256 values are documented; MSI/WiX, updater signing, and paid-provider requests remain intentionally unverified.",
           "dependsOn": [
             "US-007-ST-004"
           ],

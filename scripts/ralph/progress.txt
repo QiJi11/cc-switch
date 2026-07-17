@@ -702,3 +702,29 @@ Started: 2026-07-17T02:40:00+08:00
   - Update the session cache after the command succeeds so the selected route and list badge move together.
   - The existing App integration test needs a larger timeout on this Windows host; its assertions are valid and pass at 20 seconds.
 ---
+
+## 2026-07-18 05:27 +08:00 - US-007-ST-005
+- Story: US-007 - Pin Codex providers per conversation
+- What was completed
+  - Added a local HTTP fixture that sends three Codex sessions concurrently to three pinned providers without changing the global provider.
+  - Verified proxy restart persistence, manual A-to-B repinning, clearing B back to global C, and per-session last-success ownership.
+  - Updated the deployment guide with per-conversation binding, no-fallback behavior for pinned failures, advisory health semantics, clearing a pin, safe handoff behavior, and rollback steps.
+- Quality checks run and results
+  - Focused concurrent route fixture: passed, 1 passed / 0 failed.
+  - TypeScript: passed.
+  - Frontend: passed, 408 passed / 0 failed with a 60-second per-test limit. An initial run at 20 seconds had one existing App integration test time out at 20.08 seconds; the assertion suite passed on rerun.
+  - Rust: library 1806 passed / 0 failed / 2 ignored; every independent integration test target passed.
+  - Prettier, Rust format, and `git diff --check`: passed.
+  - Vite production build and Rust release build: passed in a clean detached worktree at `c2ce97de`.
+  - NSIS-only bundle: passed after disabling updater artifact creation for this unsigned local build. MSI/WiX and updater signing were not run.
+- Final deliverables
+  - EXE SHA-256: `366D852D15E332F689D3148E68FA9B368006597E29EC0CBD8418643F2E76F939`.
+  - NSIS SHA-256: `319EABA30D6AB24C4B97C5FC4CA10535B2CFCD303422C57E3A395C2A25896717`.
+  - NSIS retains the existing `__TAURI_BUNDLE_TYPE` warning, so updater compatibility remains unverified.
+  - No paid-provider request was sent, Codex App and CLI HOME behavior was unchanged, and the running installation was not replaced.
+- Test guard: clean; the new fixture uses real SQLite state and a local HTTP boundary, and asserts observable routing and persisted ownership.
+- Docs guard: clean after matching every command, setting key, error code, route behavior, artifact path, and hash to source or direct output.
+- **Learnings for future iterations:**
+  - Build final artifacts from a clean worktree when another task owns unrelated dirty Rust files.
+  - Disable updater artifact generation for unsigned local NSIS verification instead of treating the missing private key as an installer failure.
+---
