@@ -32,6 +32,7 @@ mod schema;
 mod tests;
 
 // DAO 类型导出供外部使用
+pub(crate) use dao::codex_session_routes::{canonical_codex_session_id, CodexSessionRoute};
 pub(crate) use dao::providers_seed::{is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
 pub(crate) use dao::proxy::{
     validate_cost_multiplier, validate_pricing_source, PRICING_SOURCE_REQUEST,

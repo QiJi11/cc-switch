@@ -503,8 +503,8 @@
             "Tauri command registration and TypeScript API types compile"
           ],
           "priority": 14,
-          "passes": false,
-          "notes": "",
+          "passes": true,
+          "notes": "Session list responses now include persisted Codex route metadata, the validated set_codex_session_provider command sets or clears only the pin, and successful session/provider deletion cleans pins without losing last-success ownership.",
           "dependsOn": [
             "US-007-ST-002"
           ],

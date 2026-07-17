@@ -623,3 +623,39 @@ Started: 2026-07-17T02:40:00+08:00
   - Route-table read failures are safety failures, not ordinary database errors, because silently falling back could consume another provider.
   - A pinned request may update that provider's health but must not update the global current provider or invoke the failover switch manager.
 ---
+
+## 2026-07-18 03:43 +08:00 - US-007-ST-003
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Added route metadata to session-list responses as `pinnedProviderId` and `lastSuccessfulProviderId` for Codex sessions only.
+  - Added `set_codex_session_provider`, validating the canonical session UUID and selected Codex provider before setting a pin; null clears only the pin.
+  - Removed persisted route rows after successful single or batch Codex session deletion.
+  - Made Codex provider deletion atomically clear matching pins while preserving last-success ownership.
+  - Added the Tauri registration, TypeScript fields, and frontend session API method.
+- Files changed
+  - `src-tauri/src/commands/session_manager.rs`
+  - `src-tauri/src/database/dao/codex_session_routes.rs`
+  - `src-tauri/src/database/dao/providers.rs`
+  - `src-tauri/src/database/mod.rs`
+  - `src-tauri/src/lib.rs`
+  - `src/lib/api/sessions.ts`
+  - `src/types.ts`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Session route command tests: passed, 3 passed / 0 failed.
+  - Codex session-route persistence and provider-deletion tests: passed, 7 passed / 0 failed.
+  - Full Rust library suite: passed, 1805 passed / 0 failed / 2 ignored.
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: canonicalized scanned UUIDs before route lookup and kept provider deletion atomic; final guard pass clean.
+  - `test-guard`: clean; command and cleanup tests use real SQLite state and observable returned metadata.
+- Browser verification result: not applicable; the selector UI is the next subtask.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Keep filesystem scanning independent, then enrich its result with one route-table query at the command boundary.
+  - Canonicalize scanned UUIDs before joining them to database keys.
+  - Provider deletion must clear pins in the same transaction as deleting the provider.
+---

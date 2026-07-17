@@ -278,12 +278,29 @@ impl Database {
     }
 
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
-            "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
-            params![id, app_type],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut conn = lock_conn!(self.conn);
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        if app_type == "codex" {
+            transaction
+                .execute(
+                    "UPDATE codex_session_routes
+                     SET pinned_provider_id = NULL, updated_at = ?2
+                     WHERE pinned_provider_id = ?1",
+                    params![id, chrono::Utc::now().timestamp_millis()],
+                )
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
+                params![id, app_type],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::Database(error.to_string()))?;
         Ok(())
     }
 
