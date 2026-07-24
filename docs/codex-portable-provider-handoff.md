@@ -27,9 +27,9 @@
 ## 部署步骤
 
 1. 完全退出 Codex App 和 CC Switch，确认两者不再持有配置文件或安装目录。
-2. 使用已验证的 NSIS 安装包升级 CC Switch：
+2. 使用本轮已核对版本与哈希的 3.18.0 NSIS 安装包升级 CC Switch（实际根目录取决于构建时的 `CARGO_TARGET_DIR`）：
 
-   `src-tauri\target\release\bundle\nsis\CC Switch_3.16.5_x64-setup.exe`
+   `<CARGO_TARGET_DIR>\release\bundle\nsis\CC Switch_3.18.0_x64-setup.exe`
 
 3. 启动 CC Switch，在“设置 → 路由”打开路由总开关并启用 Codex 接管。
 4. 在“设置 → 通用 → Codex 应用增强”保持“跨供应商切换时保留可见上下文”开启。需要保留官方插件或远程能力时，同时保持“切换第三方时保留官方登录”开启。
@@ -52,11 +52,11 @@
 
 当前仓库验证结果以本轮发布复验记录为准：
 
-- TypeScript：项目内 `tsc --noEmit` 通过；完整前端测试 `408 passed / 0 failed`，Prettier 检查通过。
-- Rust：库测试 `1806 passed / 2 ignored / 0 failed`，其余独立集成测试目标全部通过；Rust 格式和 `git diff --check` 通过。
+- TypeScript：项目内 `tsc --noEmit` 通过；完整前端测试 `525 passed / 0 failed`，Vite production build 和 Prettier 检查通过。
+- Rust：库测试 `2156 passed / 2 ignored / 0 failed`，其余独立集成测试目标全部通过；`cargo clippy --all-targets --all-features -- -D warnings`、Rust 格式和 `git diff --check` 通过。
 - 会话路由本地 HTTP fixture：三个不同 session 同时固定到 A、B、C，代理重启后 A 改绑 B，B 清除绑定后走全局 C，全局供应商不被绑定请求修改；已有绑定失败不回退、工具不重复和日志防泄漏回归继续通过。所有上游均为本地 fixture，没有发送外部模型请求。
-- Production：在干净工作区从功能代码提交 `c2ce97de` 直接执行 Vite production build、Rust release build 和 NSIS-only bundle，均成功。MSI/WiX、updater 签名产物和 updater 兼容性未验证；NSIS 仍有既有 `__TAURI_BUNDLE_TYPE` 未找到警告，因此本次只把 NSIS 作为已验证的 Windows 安装产物。
-- 最终 Windows 产物：EXE SHA-256 `366D852D15E332F689D3148E68FA9B368006597E29EC0CBD8418643F2E76F939`；NSIS SHA-256 `319EABA30D6AB24C4B97C5FC4CA10535B2CFCD303422C57E3A395C2A25896717`。
+- Production：在干净工作区从功能代码提交 `fd2e3b96506141e9b91ff4b543b0e7e8a4b70604` 执行 Vite production build 和 Tauri release + NSIS build，均成功。由于本机没有 updater 私钥，本轮构建通过临时 config override 设置 `createUpdaterArtifacts=false`，没有生成 updater 签名产物。MSI/WiX、updater 签名与 updater 兼容性均未验证；NSIS 仍有既有 `__TAURI_BUNDLE_TYPE` 未找到警告。EXE 和 NSIS 的 PE 版本均为 3.18.0，且均未做 Authenticode 签名。
+- 最终 Windows 产物：EXE SHA-256 `8C2979EB4D568EC43637779C238B1C4EBC910C1C9F87443F991F0DD61AC8A583`；NSIS SHA-256 `0909D97929369E6925F5A60A497776B1114C3C4F54AFD2B21CD5537DFD8EF099`。
 
 ## 回滚
 
