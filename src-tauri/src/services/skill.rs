@@ -507,6 +507,11 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::GrokBuild => {
+                if let Some(custom) = crate::settings::get_grok_override_dir() {
+                    return Ok(custom.join("skills"));
+                }
+            }
             AppType::OpenCode => {
                 if let Some(custom) = crate::settings::get_opencode_override_dir() {
                     return Ok(custom.join("skills"));
@@ -524,7 +529,9 @@ impl SkillService {
             }
         }
 
-        // 默认路径：回退到用户主目录下的标准位置
+        // 默认路径：回退到用户主目录下的标准位置。
+        // 必须走 get_home_dir()（可被 CC_SWITCH_TEST_HOME 覆盖）：Windows 上 dirs::home_dir()
+        // 走 Known Folder API，测试无法隔离真实用户目录。
         let home = get_home_dir();
 
         Ok(match app {
@@ -532,6 +539,7 @@ impl SkillService {
             AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
+            AppType::GrokBuild => home.join(".grok").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
@@ -3046,6 +3054,36 @@ mod tests {
             format!("---\nname: {name}\ndescription: Test skill\n---\n"),
         )
         .expect("write SKILL.md");
+    }
+
+    #[test]
+    // serial：与 backup/s3_sync/deeplink 等同样读写进程级 CC_SWITCH_TEST_HOME 的测试互斥，
+    // EnvGuard 只负责恢复不提供互斥。
+    #[serial_test::serial]
+    fn get_app_skills_dir_honors_test_home_override() {
+        // 回归：曾直呼 dirs::home_dir() 绕过 CC_SWITCH_TEST_HOME——Unix 上碰巧跟 $HOME
+        // 一致所以测试能过，Windows 上 dirs 走 Known Folder API，测试隔离整体失效
+        // （tests/skill_sync.rs 扫到 runner 真实用户目录）。
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+            }
+        }
+        let temp = tempdir().expect("tempdir");
+        let _guard = EnvGuard(std::env::var_os("CC_SWITCH_TEST_HOME"));
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        let dir =
+            SkillService::get_app_skills_dir(&AppType::Claude).expect("resolve claude skills dir");
+        assert!(
+            dir.starts_with(temp.path()),
+            "skills dir must live under the overridden test home, got {}",
+            dir.display()
+        );
     }
 
     #[test]

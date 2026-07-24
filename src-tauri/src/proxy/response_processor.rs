@@ -32,6 +32,13 @@ use tokio::sync::Mutex;
 pub(crate) struct ResponseLifecycle {
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
     pub(crate) codex_route_attempt: Option<CodexRouteAttempt>,
+    route_response_kind: CodexRouteResponseKind,
+}
+
+#[derive(Clone, Copy)]
+enum CodexRouteResponseKind {
+    Response,
+    ResponseOrCompaction,
 }
 
 impl ResponseLifecycle {
@@ -42,8 +49,69 @@ impl ResponseLifecycle {
         Self {
             connection_guard,
             codex_route_attempt,
+            route_response_kind: CodexRouteResponseKind::Response,
         }
     }
+
+    pub(crate) fn for_codex_endpoint(mut self, endpoint: &str) -> Self {
+        self.route_response_kind = if endpoint.split('?').next() == Some("/responses/compact") {
+            CodexRouteResponseKind::ResponseOrCompaction
+        } else {
+            CodexRouteResponseKind::Response
+        };
+        self
+    }
+
+    pub(crate) fn response_completes_route(&self, response: &Value) -> bool {
+        self.codex_route_attempt.is_some() && self.route_response_kind.is_complete(response)
+    }
+
+    pub(crate) fn take_route_attempt_for_response(
+        &mut self,
+        response: &Value,
+    ) -> Option<CodexRouteAttempt> {
+        if self.route_response_kind.is_complete(response) {
+            self.codex_route_attempt.take()
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) fn is_completed_codex_response(response: &Value) -> bool {
+    response.get("status").and_then(Value::as_str) == Some("completed")
+}
+
+fn is_completed_codex_compaction(response: &Value) -> bool {
+    response.get("object").and_then(Value::as_str) == Some("response.compaction")
+}
+
+impl CodexRouteResponseKind {
+    fn is_complete(self, response: &Value) -> bool {
+        is_completed_codex_response(response)
+            || matches!(self, Self::ResponseOrCompaction) && is_completed_codex_compaction(response)
+    }
+}
+
+fn is_completed_codex_event(event: &Value, response_kind: CodexRouteResponseKind) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("response.completed")
+        && event
+            .get("response")
+            .is_some_and(|response| response_kind.is_complete(response))
+}
+
+pub(crate) fn body_with_route_completion(
+    body: Bytes,
+    route_attempt: Option<CodexRouteAttempt>,
+) -> axum::body::Body {
+    let Some(route_attempt) = route_attempt else {
+        return axum::body::Body::from(body);
+    };
+
+    axum::body::Body::from_stream(async_stream::stream! {
+        yield Ok::<Bytes, std::convert::Infallible>(body);
+        route_attempt.complete_successfully();
+    })
 }
 
 // ============================================================================
@@ -228,10 +296,8 @@ pub async fn handle_non_streaming(
     ctx: &RequestContext,
     state: &ProxyState,
     parser_config: &UsageParserConfig,
-    lifecycle: ResponseLifecycle,
+    mut lifecycle: ResponseLifecycle,
 ) -> Result<Response, ProxyError> {
-    // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
-    let _connection_guard = lifecycle.connection_guard;
     // 整包超时：仅在故障转移开启且配置值非零时生效
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
@@ -243,10 +309,17 @@ pub async fn handle_non_streaming(
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     strip_hop_by_hop_response_headers(&mut response_headers);
 
+    let route_attempt = serde_json::from_slice::<Value>(&body_bytes)
+        .ok()
+        .and_then(|response| lifecycle.take_route_attempt_for_response(&response));
+    if route_attempt.is_some() {
+        response_headers.remove(axum::http::header::CONTENT_LENGTH);
+    }
+
     log::debug!(
-        "[{}] 上游响应体内容: {}",
+        "[{}] 上游响应体已接收: bytes={} (content omitted)",
         ctx.tag,
-        String::from_utf8_lossy(&body_bytes)
+        body_bytes.len()
     );
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
@@ -327,17 +400,11 @@ pub async fn handle_non_streaming(
         builder = builder.header(key, value);
     }
 
-    let body = axum::body::Body::from(body_bytes);
-    let response = builder.body(body).map_err(|e| {
+    let body = body_with_route_completion(body_bytes, route_attempt);
+    builder.body(body).map_err(|e| {
         log::error!("[{}] 构建响应失败: {e}", ctx.tag);
         ProxyError::Internal(format!("Failed to build response: {e}"))
-    });
-    if response.is_ok() {
-        if let Some(attempt) = lifecycle.codex_route_attempt {
-            attempt.complete_successfully();
-        }
-    }
-    response
+    })
 }
 
 /// 通用响应处理入口
@@ -481,7 +548,7 @@ impl Drop for SseUsageFinishGuard {
 // ============================================================================
 
 /// 创建使用量收集器
-fn create_usage_collector(
+pub(crate) fn create_usage_collector(
     ctx: &RequestContext,
     state: &ProxyState,
     status_code: u16,
@@ -667,7 +734,8 @@ async fn log_usage_internal(
         model
     };
 
-    let request_id = usage.dedup_request_id();
+    let dedup_scope = (app_type != "claude").then_some((app_type, provider_id));
+    let request_id = usage.dedup_request_id(dedup_scope);
 
     log::debug!(
         "[{app_type}] 记录请求日志: id={request_id}, provider={provider_id}, model={model}, streaming={is_streaming}, status={status_code}, latency_ms={latency_ms}, first_token_ms={first_token_ms:?}, session={}, input={}, output={}, cache_read={}, cache_creation={}",
@@ -713,6 +781,8 @@ pub fn create_logged_passthrough_stream(
         let mut collector = usage_collector;
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
         let mut route_attempt = lifecycle.codex_route_attempt;
+        let route_response_kind = lifecycle.route_response_kind;
+        let mut complete_route_after_yield = false;
         let inspect_sse_events =
             collector.is_some() || route_attempt.is_some() || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
@@ -776,15 +846,10 @@ pub fn create_logged_passthrough_stream(
                                     if let Some(data) = strip_sse_field(line, "data") {
                                         if data.trim() != "[DONE]" {
                                             let parsed = serde_json::from_str::<Value>(data).ok();
-                                            if parsed
-                                                .as_ref()
-                                                .and_then(|event| event.get("type"))
-                                                .and_then(Value::as_str)
-                                                == Some("response.completed")
-                                            {
-                                                if let Some(attempt) = route_attempt.take() {
-                                                    attempt.complete_successfully();
-                                                }
+                                            if parsed.as_ref().is_some_and(|event| {
+                                                is_completed_codex_event(event, route_response_kind)
+                                            }) {
+                                                complete_route_after_yield = true;
                                             }
                                             let collected = match (&collector, parsed) {
                                                 (Some(c), Some(json_value)) if c.should_collect(data) => {
@@ -793,11 +858,10 @@ pub fn create_logged_passthrough_stream(
                                                 }
                                                 _ => false,
                                             };
-                                            if collected {
-                                                log::debug!("[{tag}] <<< SSE 事件: {data}");
-                                            } else {
-                                                log::debug!("[{tag}] <<< SSE 数据: {data}");
-                                            }
+                                            log::trace!(
+                                                "[{tag}] <<< SSE data: bytes={}, usage_collected={collected} (content omitted)",
+                                                data.len()
+                                            );
                                         } else {
                                             log::debug!("[{tag}] <<< SSE: [DONE]");
                                         }
@@ -808,6 +872,12 @@ pub fn create_logged_passthrough_stream(
                     }
 
                     yield Ok(bytes);
+                    if complete_route_after_yield {
+                        if let Some(attempt) = route_attempt.take() {
+                            attempt.complete_successfully();
+                        }
+                        complete_route_after_yield = false;
+                    }
                 }
                 Some(Err(e)) => {
                     log::error!("[{tag}] 流错误: {e}");
@@ -830,15 +900,53 @@ pub fn create_logged_passthrough_stream(
     }
 }
 
+fn is_safe_diagnostic_header(name: &str) -> bool {
+    matches!(
+        name,
+        "content-type"
+            | "content-encoding"
+            | "content-length"
+            | "retry-after"
+            | "cf-ray"
+            | "x-request-id"
+            | "request-id"
+            | "x-correlation-id"
+    ) || name.starts_with("x-ratelimit-")
+        || name.starts_with("ratelimit-")
+}
+
+fn bounded_header_value(value: &axum::http::HeaderValue) -> Option<String> {
+    let value = value.to_str().ok()?;
+    let mut bounded = value.chars().take(160).collect::<String>();
+    if value.chars().count() > 160 {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
 fn format_headers(headers: &HeaderMap) -> String {
-    headers
-        .iter()
-        .map(|(key, value)| {
-            let value_str = value.to_str().unwrap_or("<non-utf8>");
-            format!("{key}={value_str}")
+    let mut entries = headers
+        .keys()
+        .map(|key| {
+            let name = key.as_str();
+            if !is_safe_diagnostic_header(name) {
+                return name.to_string();
+            }
+
+            let values = headers
+                .get_all(key)
+                .iter()
+                .filter_map(bounded_header_value)
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}={}", values.join("|"))
+            }
         })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+    entries.sort();
+    format!("[{}]", entries.join(", "))
 }
 
 #[cfg(test)]
@@ -873,6 +981,25 @@ mod tests {
             .begin_attempt("session-1", "provider-a")
             .complete_successfully();
         route_state
+    }
+
+    #[test]
+    fn format_headers_keeps_only_allowlisted_diagnostic_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer super-secret".parse().unwrap());
+        headers.insert("set-cookie", "session=cookie-secret".parse().unwrap());
+        headers.insert("retry-after", "30".parse().unwrap());
+        headers.insert("x-ratelimit-remaining", "2".parse().unwrap());
+        headers.insert("cf-ray", "abc123-SJC".parse().unwrap());
+
+        let formatted = format_headers(&headers);
+        assert!(formatted.contains("authorization"), "{formatted}");
+        assert!(formatted.contains("set-cookie"), "{formatted}");
+        assert!(formatted.contains("retry-after=30"), "{formatted}");
+        assert!(formatted.contains("x-ratelimit-remaining=2"), "{formatted}");
+        assert!(formatted.contains("cf-ray=abc123-SJC"), "{formatted}");
+        assert!(!formatted.contains("super-secret"), "{formatted}");
+        assert!(!formatted.contains("cookie-secret"), "{formatted}");
     }
 
     #[test]
@@ -946,6 +1073,139 @@ mod tests {
                 .previous_provider_id(),
             Some("provider-b")
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_completed_sse_chunk_keeps_previous_provider_route() {
+        let route_state = route_state_owned_by_provider_a();
+        let completed_attempt = route_state.begin_attempt("session-1", "provider-b");
+        let completed_stream = futures::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+            Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            ),
+        )]);
+        let completed = create_logged_passthrough_stream(
+            completed_stream,
+            "Codex",
+            None,
+            no_streaming_timeouts(),
+            ResponseLifecycle::new(None, Some(completed_attempt)),
+        );
+        futures::pin_mut!(completed);
+
+        assert!(completed.next().await.is_some());
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_incomplete_sse_keeps_previous_provider_route() {
+        let route_state = route_state_owned_by_provider_a();
+        let incomplete_attempt = route_state.begin_attempt("session-1", "provider-b");
+        let incomplete_stream = futures::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+            Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\"}}\n\n",
+            ),
+        )]);
+        let incomplete = create_logged_passthrough_stream(
+            incomplete_stream,
+            "Codex",
+            None,
+            no_streaming_timeouts(),
+            ResponseLifecycle::new(None, Some(incomplete_attempt)),
+        );
+
+        assert_eq!(incomplete.collect::<Vec<_>>().await.len(), 1);
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-a")
+        );
+    }
+
+    #[test]
+    fn codex_compaction_completes_only_compact_route_lifecycle() {
+        let route_state = route_state_owned_by_provider_a();
+        let response = serde_json::json!({
+            "id": "cmp_1",
+            "object": "response.compaction",
+            "output": []
+        });
+        let responses_lifecycle = ResponseLifecycle::new(
+            None,
+            Some(route_state.begin_attempt("session-1", "provider-b")),
+        )
+        .for_codex_endpoint("/responses");
+        let compact_lifecycle = ResponseLifecycle::new(
+            None,
+            Some(route_state.begin_attempt("session-1", "provider-b")),
+        )
+        .for_codex_endpoint("/responses/compact?mode=test");
+
+        assert!(!responses_lifecycle.response_completes_route(&response));
+        assert!(compact_lifecycle.response_completes_route(&response));
+    }
+
+    #[tokio::test]
+    async fn non_streaming_route_commits_only_after_body_is_consumed() {
+        let route_state = route_state_owned_by_provider_a();
+        let body = body_with_route_completion(
+            Bytes::from_static(br#"{"status":"completed"}"#),
+            Some(route_state.begin_attempt("session-1", "provider-b")),
+        );
+
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-a")
+        );
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("consume response body");
+        assert_eq!(bytes, Bytes::from_static(br#"{"status":"completed"}"#));
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-b")
+        );
+    }
+
+    #[test]
+    fn dropping_non_streaming_body_keeps_previous_provider_route() {
+        let route_state = route_state_owned_by_provider_a();
+        let body = body_with_route_completion(
+            Bytes::from_static(br#"{"status":"completed"}"#),
+            Some(route_state.begin_attempt("session-1", "provider-b")),
+        );
+
+        drop(body);
+
+        assert_eq!(
+            route_state
+                .begin_attempt("session-1", "provider-c")
+                .previous_provider_id(),
+            Some("provider-a")
+        );
+    }
+
+    #[test]
+    fn codex_route_completion_rejects_non_success_statuses() {
+        for status in ["incomplete", "failed", "cancelled", "in_progress"] {
+            assert!(!is_completed_codex_response(&serde_json::json!({
+                "status": status
+            })));
+        }
+        assert!(!is_completed_codex_response(&serde_json::json!({})));
+        assert!(is_completed_codex_response(&serde_json::json!({
+            "status": "completed"
+        })));
     }
 
     #[test]
