@@ -1050,8 +1050,14 @@ async fn handle_codex_responses_namespace_restore(
     // restorable function calls; hand them to the generic passthrough so error
     // shape and usage handling stay identical to the untransformed path.
     if !status.is_success() {
-        return process_response(response, ctx, state, &CODEX_PARSER_CONFIG, connection_guard)
-            .await;
+        return process_response(
+            response,
+            ctx,
+            state,
+            &CODEX_PARSER_CONFIG,
+            ResponseLifecycle::new(connection_guard, None),
+        )
+        .await;
     }
 
     if response.is_sse() {
@@ -1075,7 +1081,7 @@ async fn handle_codex_responses_namespace_restore(
             ctx.tag,
             usage_collector,
             ctx.streaming_timeout_config(),
-            connection_guard,
+            ResponseLifecycle::new(connection_guard, None),
         );
 
         let body = axum::body::Body::from_stream(logged_stream);
@@ -1647,7 +1653,7 @@ fn build_codex_anthropic_sse_response(
         ctx.tag,
         usage_collector,
         ctx.streaming_timeout_config(),
-        connection_guard,
+        ResponseLifecycle::new(connection_guard, None),
     );
 
     let mut headers = axum::http::HeaderMap::new();
