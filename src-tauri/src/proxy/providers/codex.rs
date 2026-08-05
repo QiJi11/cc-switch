@@ -120,16 +120,22 @@ fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// For Codex Chat providers, ensure the request uses the configured upstream
-/// model before converting the request to Chat Completions.
-pub fn apply_codex_chat_upstream_model(
-    provider: &Provider,
-    body: &mut JsonValue,
-) -> Option<String> {
-    if !codex_provider_uses_chat_completions(provider) {
-        return None;
-    }
+pub fn codex_provider_catalog_contains_model(provider: &Provider, model: &str) -> bool {
+    !model.is_empty() && codex_provider_catalog_model_ids(provider).contains(model)
+}
 
+pub fn codex_provider_is_multi_provider_gateway(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get("ccSwitchMultiProviderGateway")
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+}
+
+/// Ensure a Codex request uses the model configured for the active provider.
+/// A provider catalog remains authoritative when it explicitly contains the
+/// requested model; providers without a catalog use their configured default.
+pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> Option<String> {
     let catalog_model_ids = codex_provider_catalog_model_ids(provider);
     if let Some(request_model) = body
         .get("model")
@@ -809,12 +815,39 @@ wire_api = "responses"
             "input": "ping"
         });
 
-        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
 
         assert_eq!(upstream_model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(
             body.get("model").and_then(|v| v.as_str()),
             Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_maps_native_responses_provider() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+model = "gpt-provider-default"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://example.com/v1"
+wire_api = "responses"
+"#
+        }));
+        let mut body = json!({
+            "model": "gpt-model-from-previous-provider",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("gpt-provider-default"));
+        assert_eq!(
+            body.get("model").and_then(|value| value.as_str()),
+            Some("gpt-provider-default")
         );
     }
 
@@ -846,7 +879,7 @@ wire_api = "responses"
             "input": "ping"
         });
 
-        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));

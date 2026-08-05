@@ -1,0 +1,143 @@
+{
+  "project": "MyApp",
+  "branchName": "ralph/task-priority",
+  "description": "Task Priority System - Add priority levels to tasks",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Task priority persistence",
+      "description": "As a user, I want task priority to persist so the UI can reflect it consistently.",
+      "priority": 1,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-001-ST-001",
+          "title": "Add priority field to database",
+          "description": "Add persistent schema support for task priority.",
+          "acceptanceCriteria": [
+            "Add priority column to tasks table: 'high' | 'medium' | 'low' (default 'medium')",
+            "Generate and run migration successfully",
+            "Typecheck passes"
+          ],
+          "priority": 1,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "db/schema.ts",
+            "migrations/*"
+          ],
+          "touches": [
+            "db/schema"
+          ],
+          "stateWrites": [
+            "migration"
+          ],
+          "fileBudget": 2
+        }
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Task priority UI",
+      "description": "As a user, I want to view and update task priority in the interface.",
+      "priority": 2,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-002-ST-001",
+          "title": "Display priority indicator on task cards",
+          "description": "Show task priority visually on existing task cards.",
+          "acceptanceCriteria": [
+            "Each task card shows colored priority badge (red=high, yellow=medium, gray=low)",
+            "Priority visible without hovering or clicking",
+            "Typecheck passes",
+            "Verify in browser using available Codex browser tooling"
+          ],
+          "priority": 2,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-001-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src/components/TaskCard.tsx"
+          ],
+          "touches": [
+            "ui/task-card"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2
+        },
+        {
+          "id": "US-002-ST-002",
+          "title": "Add priority selector to task edit",
+          "description": "Allow editing task priority in the task edit flow.",
+          "acceptanceCriteria": [
+            "Priority dropdown in task edit modal",
+            "Shows current priority as selected",
+            "Saves immediately on selection change",
+            "Typecheck passes",
+            "Verify in browser using available Codex browser tooling"
+          ],
+          "priority": 3,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-001-ST-001"
+          ],
+          "parallelSafe": true,
+          "estimatedFiles": [
+            "src/components/TaskEditModal.tsx"
+          ],
+          "touches": [
+            "ui/task-edit"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3
+        }
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Priority filtering",
+      "description": "As a user, I want to filter the task list by priority when focusing work.",
+      "priority": 3,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-003-ST-001",
+          "title": "Filter tasks by priority",
+          "description": "Add priority filter controls to the task list UI.",
+          "acceptanceCriteria": [
+            "Filter dropdown with options: All | High | Medium | Low",
+            "Filter persists in URL params",
+            "Empty state message when no tasks match filter",
+            "Typecheck passes",
+            "Verify in browser using available Codex browser tooling"
+          ],
+          "priority": 4,
+          "passes": false,
+          "notes": "",
+          "dependsOn": [
+            "US-001-ST-001"
+          ],
+          "parallelSafe": true,
+          "estimatedFiles": [
+            "src/pages/TaskList.tsx"
+          ],
+          "touches": [
+            "ui/task-list-filter"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3
+        }
+      ]
+    }
+  ]
+}

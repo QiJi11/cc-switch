@@ -126,6 +126,8 @@ pub struct RequestForwarder {
     session_client_provided: bool,
     /// A pinned request must never mutate global provider selection or tray state.
     session_provider_pinned: bool,
+    /// Commit the selected provider as the session pin only after full success.
+    session_repin_on_success: bool,
     /// Whether provider changes may reconstruct visible context from the local Codex rollout.
     /// Provider-bound state is sanitized regardless of this setting.
     codex_portable_handoff_on_provider_change: bool,
@@ -208,6 +210,7 @@ impl RequestForwarder {
         session_id: String,
         session_client_provided: bool,
         session_provider_pinned: bool,
+        session_repin_on_success: bool,
         codex_portable_handoff_on_provider_change: bool,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
@@ -232,6 +235,7 @@ impl RequestForwarder {
             session_id,
             session_client_provided,
             session_provider_pinned,
+            session_repin_on_success,
             codex_portable_handoff_on_provider_change,
             rectifier_config,
             optimizer_config,
@@ -259,11 +263,14 @@ impl RequestForwarder {
             return Ok((body, None));
         }
 
-        let attempt = self.codex_route_state.begin_attempt_with_boundary(
-            self.session_id.clone(),
-            provider.id.clone(),
-            self.session_provider_pinned,
-        );
+        let attempt = self
+            .codex_route_state
+            .begin_attempt_with_boundary_and_repin(
+                self.session_id.clone(),
+                provider.id.clone(),
+                self.session_provider_pinned,
+                self.session_repin_on_success,
+            );
         let body = if attempt.is_provider_change() {
             self.portable_codex_body_with_reader(body, read_visible_transcript)?
         } else {
@@ -1286,6 +1293,9 @@ impl RequestForwarder {
         };
         let codex_responses_to_chat = matches!(app_type, AppType::Codex)
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
+        if matches!(app_type, AppType::Codex) {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
         } else if needs_transform && adapter.name() == "Claude" {
@@ -1341,7 +1351,6 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
-            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -2829,6 +2838,7 @@ mod tests {
             session_id: String::new(),
             session_client_provided: false,
             session_provider_pinned: false,
+            session_repin_on_success: false,
             codex_portable_handoff_on_provider_change: true,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
@@ -3332,6 +3342,45 @@ mod tests {
         assert!(body.get("previous_response_id").is_none());
         assert!(body["input"][0].get("id").is_none());
         assert!(attempt.expect("route attempt").is_provider_change());
+    }
+
+    #[test]
+    fn successful_gateway_handoff_repins_persistent_session() {
+        const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_pinned_success(SESSION_ID, "provider-a")
+            .expect("seed original pin");
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.codex_route_state = Arc::new(CodexRouteState::with_database(db.clone()));
+        forwarder.session_id = format!("codex_{SESSION_ID}");
+        forwarder.session_client_provided = true;
+        forwarder.session_provider_pinned = true;
+        forwarder.session_repin_on_success = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+        let mut gateway = test_provider_with_type(Some("openai"));
+        gateway.id = "gateway".to_string();
+
+        let (_, attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &gateway,
+                json!({"input": []}),
+            )
+            .expect("prepare gateway handoff");
+        attempt
+            .expect("persistent route attempt")
+            .complete_successfully();
+
+        let route = db
+            .get_codex_session_route(SESSION_ID)
+            .expect("read migrated route")
+            .expect("migrated route");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
+        );
     }
 
     #[test]

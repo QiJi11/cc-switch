@@ -105,6 +105,31 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically commit a successful provider migration and pin the session
+    /// to that provider.
+    pub fn set_codex_session_pinned_success(
+        &self,
+        session_id: &str,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let session_id = canonical_codex_session_id(session_id)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "INSERT INTO codex_session_routes
+                (session_id, pinned_provider_id, last_successful_provider_id,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?2, ?3, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                pinned_provider_id = excluded.pinned_provider_id,
+                last_successful_provider_id = excluded.last_successful_provider_id,
+                updated_at = excluded.updated_at",
+            params![session_id, provider_id, now],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// Record completed ownership without changing the user's current pin.
     pub fn set_codex_session_last_successful_provider(
         &self,
@@ -126,6 +151,40 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Record completed ownership only if the pin still matches the request's
+    /// starting pin. This prevents an older request from undoing a later repin.
+    pub fn set_codex_session_last_successful_if_pin_matches(
+        &self,
+        session_id: &str,
+        provider_id: &str,
+        expected_pinned_provider_id: Option<&str>,
+    ) -> Result<bool, AppError> {
+        let session_id = canonical_codex_session_id(session_id)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let conn = lock_conn!(self.conn);
+        let affected = match expected_pinned_provider_id {
+            Some(expected_pin) => conn.execute(
+                "UPDATE codex_session_routes
+                 SET last_successful_provider_id = ?2, updated_at = ?3
+                 WHERE session_id = ?1 AND pinned_provider_id = ?4",
+                params![session_id, provider_id, now, expected_pin],
+            ),
+            None => conn.execute(
+                "INSERT INTO codex_session_routes
+                    (session_id, pinned_provider_id, last_successful_provider_id,
+                     created_at, updated_at)
+                 VALUES (?1, NULL, ?2, ?3, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    last_successful_provider_id = excluded.last_successful_provider_id,
+                    updated_at = excluded.updated_at
+                 WHERE codex_session_routes.pinned_provider_id IS NULL",
+                params![session_id, provider_id, now],
+            ),
+        }
+        .map_err(|error| AppError::Database(error.to_string()))?;
+        Ok(affected == 1)
     }
 
     /// Clear every pin targeting a deleted provider while retaining route ownership.
@@ -199,6 +258,48 @@ mod tests {
         assert_eq!(
             route.last_successful_provider_id.as_deref(),
             Some("provider-a")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successful_migration_updates_pin_and_owner_together() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.set_codex_session_pin(SESSION_ID, "provider-a")?;
+        db.set_codex_session_last_successful_provider(SESSION_ID, "provider-a")?;
+
+        db.set_codex_session_pinned_success(SESSION_ID, "gateway")?;
+
+        let route = db
+            .get_codex_session_route(SESSION_ID)?
+            .expect("route should exist");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_completion_cannot_change_owner_after_repin() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.set_codex_session_pinned_success(SESSION_ID, "provider-a")?;
+
+        db.set_codex_session_pinned_success(SESSION_ID, "gateway")?;
+        assert!(!db.set_codex_session_last_successful_if_pin_matches(
+            SESSION_ID,
+            "provider-a",
+            Some("provider-a")
+        )?);
+
+        let route = db
+            .get_codex_session_route(SESSION_ID)?
+            .expect("route should exist");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
         );
         Ok(())
     }
