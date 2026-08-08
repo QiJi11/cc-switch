@@ -503,6 +503,12 @@ pub(crate) fn build_effective_settings_with_common_config(
         }
     }
 
+    if matches!(app_type, AppType::Codex) {
+        effective_settings = crate::codex_browser_trust::apply_global_browser_trust_to_settings(
+            &effective_settings,
+        )?;
+    }
+
     Ok(effective_settings)
 }
 

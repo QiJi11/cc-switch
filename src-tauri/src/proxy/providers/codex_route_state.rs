@@ -47,7 +47,9 @@ pub struct CodexRouteAttempt {
     session_id: String,
     provider_id: String,
     previous_provider_id: Option<String>,
+    expected_pinned_provider_id: Option<String>,
     force_provider_boundary: bool,
+    pin_provider_on_success: bool,
     persistable: bool,
 }
 
@@ -69,6 +71,7 @@ impl CodexRouteState {
     }
 
     /// Start a request without changing the last successful provider.
+    #[cfg(test)]
     pub fn begin_attempt(
         self: &Arc<Self>,
         session_id: impl Into<String>,
@@ -77,19 +80,39 @@ impl CodexRouteState {
         self.begin_attempt_with_boundary(session_id, provider_id, false)
     }
 
+    #[cfg(test)]
     pub fn begin_attempt_with_boundary(
         self: &Arc<Self>,
         session_id: impl Into<String>,
         provider_id: impl Into<String>,
         force_provider_boundary: bool,
     ) -> CodexRouteAttempt {
+        self.begin_attempt_with_boundary_and_repin(
+            session_id,
+            provider_id,
+            force_provider_boundary,
+            false,
+        )
+    }
+
+    pub fn begin_attempt_with_boundary_and_repin(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        provider_id: impl Into<String>,
+        force_provider_boundary: bool,
+        pin_provider_on_success: bool,
+    ) -> CodexRouteAttempt {
         let original_session_id = session_id.into();
         let provider_id = provider_id.into();
         let canonical_session_id = canonical_session_id(&original_session_id);
         let persistable = canonical_session_id.is_some() && self.db.is_some();
         let session_id = canonical_session_id.unwrap_or(original_session_id);
-        let previous_provider_id = self
-            .lookup_persistent_provider(&session_id)
+        let persistent_route = self.lookup_persistent_route(&session_id);
+        let expected_pinned_provider_id = persistent_route
+            .as_ref()
+            .and_then(|route| route.pinned_provider_id.clone());
+        let previous_provider_id = persistent_route
+            .and_then(|route| route.last_successful_provider_id)
             .or_else(|| self.lookup_and_touch(&session_id));
         let force_provider_boundary = force_provider_boundary && previous_provider_id.is_none();
 
@@ -98,15 +121,20 @@ impl CodexRouteState {
             session_id,
             provider_id,
             previous_provider_id,
+            expected_pinned_provider_id,
             force_provider_boundary,
+            pin_provider_on_success,
             persistable,
         }
     }
 
-    fn lookup_persistent_provider(&self, session_id: &str) -> Option<String> {
+    fn lookup_persistent_route(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::database::CodexSessionRoute> {
         let db = self.db.as_ref()?;
         match db.get_codex_session_route(session_id) {
-            Ok(route) => route.and_then(|route| route.last_successful_provider_id),
+            Ok(route) => route,
             Err(error) => {
                 log::warn!(
                     "[CodexRouteState] failed to read persistent route: session={session_id}, error={error}"
@@ -147,6 +175,7 @@ impl CodexRouteState {
 }
 
 impl CodexRouteAttempt {
+    #[cfg(test)]
     pub fn previous_provider_id(&self) -> Option<&str> {
         self.previous_provider_id.as_deref()
     }
@@ -163,14 +192,34 @@ impl CodexRouteAttempt {
     pub fn complete_successfully(self) {
         if self.persistable {
             if let Some(db) = &self.state.db {
-                if let Err(error) = db
-                    .set_codex_session_last_successful_provider(&self.session_id, &self.provider_id)
-                {
-                    log::error!(
-                        "[CodexRouteState] failed to persist completed route: session={}, provider={}, error={error}",
-                        self.session_id,
-                        self.provider_id
-                    );
+                let persisted = if self.pin_provider_on_success {
+                    db.set_codex_session_pinned_success(&self.session_id, &self.provider_id)
+                        .map(|_| true)
+                } else {
+                    db.set_codex_session_last_successful_if_pin_matches(
+                        &self.session_id,
+                        &self.provider_id,
+                        self.expected_pinned_provider_id.as_deref(),
+                    )
+                };
+                match persisted {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        log::info!(
+                            "[CodexRouteState] ignored stale completion after pin changed: session={}, provider={}",
+                            self.session_id,
+                            self.provider_id
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "[CodexRouteState] failed to persist completed route: session={}, provider={}, error={error}",
+                            self.session_id,
+                            self.provider_id
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -380,5 +429,71 @@ mod tests {
         let repin = restarted_process.begin_attempt_with_boundary(SESSION_UUID, "provider-b", true);
         assert_eq!(repin.previous_provider_id(), Some("provider-a"));
         assert!(repin.is_provider_change());
+    }
+
+    #[test]
+    fn successful_gateway_migration_updates_pin_and_last_successful_provider() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_pinned_success(SESSION_UUID, "provider-a")
+            .expect("seed original pin");
+        let state = Arc::new(CodexRouteState::with_database(db.clone()));
+
+        state
+            .begin_attempt_with_boundary_and_repin(SESSION_UUID, "gateway", true, true)
+            .complete_successfully();
+
+        let route = db
+            .get_codex_session_route(SESSION_UUID)
+            .expect("read migrated route")
+            .expect("migrated route");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
+        );
+    }
+
+    #[test]
+    fn dropped_gateway_migration_keeps_original_pin() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_pinned_success(SESSION_UUID, "provider-a")
+            .expect("seed original pin");
+        let state = Arc::new(CodexRouteState::with_database(db.clone()));
+
+        drop(state.begin_attempt_with_boundary_and_repin(SESSION_UUID, "gateway", true, true));
+
+        let route = db
+            .get_codex_session_route(SESSION_UUID)
+            .expect("read unchanged route")
+            .expect("existing route");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("provider-a"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("provider-a")
+        );
+    }
+
+    #[test]
+    fn older_pinned_request_cannot_overwrite_completed_gateway_migration() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_pinned_success(SESSION_UUID, "provider-a")
+            .expect("seed original pin");
+        let state = Arc::new(CodexRouteState::with_database(db.clone()));
+
+        let older = state.begin_attempt_with_boundary(SESSION_UUID, "provider-a", true);
+        state
+            .begin_attempt_with_boundary_and_repin(SESSION_UUID, "gateway", true, true)
+            .complete_successfully();
+        older.complete_successfully();
+
+        let route = db
+            .get_codex_session_route(SESSION_UUID)
+            .expect("read migrated route")
+            .expect("migrated route");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
+        );
     }
 }
