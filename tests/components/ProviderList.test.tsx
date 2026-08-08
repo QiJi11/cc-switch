@@ -12,6 +12,8 @@ const TAURI_ENDPOINT = "http://tauri.local";
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
 const providerCardRenderSpy = vi.fn();
+const setAutoFailoverMutateAsync = vi.fn();
+let autoFailoverEnabled = false;
 
 vi.mock("@/hooks/useDragSort", () => ({
   useDragSort: (...args: unknown[]) => useDragSortMock(...args),
@@ -94,10 +96,13 @@ vi.mock("@/hooks/useStreamCheck", () => ({
 }));
 
 vi.mock("@/lib/query/failover", () => ({
-  useAutoFailoverEnabled: () => ({ data: false }),
+  useAutoFailoverEnabled: () => ({ data: autoFailoverEnabled }),
   useFailoverQueue: () => ({ data: [] }),
   useAddToFailoverQueue: () => ({ mutate: vi.fn() }),
   useRemoveFromFailoverQueue: () => ({ mutate: vi.fn() }),
+  useSetAutoFailoverEnabled: () => ({
+    mutateAsync: setAutoFailoverMutateAsync,
+  }),
   useReorderFailoverQueue: () => ({ mutate: vi.fn() }),
 }));
 
@@ -143,6 +148,8 @@ beforeEach(() => {
     sensors: [],
     handleDragEnd: vi.fn(),
   });
+  autoFailoverEnabled = false;
+  setAutoFailoverMutateAsync.mockReset().mockResolvedValue(undefined);
 });
 
 describe("ProviderList Component", () => {
@@ -576,5 +583,119 @@ describe("ProviderList Component", () => {
     expect(
       screen.queryByRole("button", { name: "provider.addProvider" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("turns off auto failover before a manual provider switch", async () => {
+    autoFailoverEnabled = true;
+    const currentProvider = createProvider({ id: "current", name: "Current" });
+    const targetProvider = createProvider({ id: "target", name: "Target" });
+    const handleSwitch = vi.fn();
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [currentProvider, targetProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ current: currentProvider, target: targetProvider }}
+        currentProviderId="current"
+        appId="codex"
+        onSwitch={handleSwitch}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        isProxyTakeover
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("switch-target"));
+
+    await waitFor(() =>
+      expect(handleSwitch).toHaveBeenCalledWith(targetProvider),
+    );
+    expect(setAutoFailoverMutateAsync).toHaveBeenCalledWith({
+      appType: "codex",
+      enabled: false,
+    });
+    expect(setAutoFailoverMutateAsync.mock.invocationCallOrder[0]).toBeLessThan(
+      handleSwitch.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not switch when disabling auto failover fails", async () => {
+    autoFailoverEnabled = true;
+    setAutoFailoverMutateAsync.mockRejectedValueOnce(
+      new Error("disable failed"),
+    );
+    const currentProvider = createProvider({ id: "current", name: "Current" });
+    const targetProvider = createProvider({ id: "target", name: "Target" });
+    const handleSwitch = vi.fn();
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [currentProvider, targetProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ current: currentProvider, target: targetProvider }}
+        currentProviderId="current"
+        appId="codex"
+        onSwitch={handleSwitch}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        isProxyTakeover
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("switch-target"));
+
+    await waitFor(() =>
+      expect(setAutoFailoverMutateAsync).toHaveBeenCalledWith({
+        appType: "codex",
+        enabled: false,
+      }),
+    );
+    expect(handleSwitch).not.toHaveBeenCalled();
+  });
+
+  it("does not apply Codex failover handling to additive apps", async () => {
+    autoFailoverEnabled = true;
+    const currentProvider = createProvider({ id: "current", name: "Current" });
+    const targetProvider = createProvider({ id: "target", name: "Target" });
+    const handleSwitch = vi.fn();
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [currentProvider, targetProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ current: currentProvider, target: targetProvider }}
+        currentProviderId="current"
+        appId="opencode"
+        onSwitch={handleSwitch}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        isProxyTakeover
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("switch-target"));
+
+    await waitFor(() =>
+      expect(handleSwitch).toHaveBeenCalledWith(targetProvider),
+    );
+    expect(setAutoFailoverMutateAsync).not.toHaveBeenCalled();
   });
 });

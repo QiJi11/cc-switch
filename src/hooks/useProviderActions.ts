@@ -333,8 +333,13 @@ export function useProviderActions(
           let messageKey = "notifications.switchSuccess";
           let defaultMessage = "切换成功！";
           if (activeApp === "codex") {
-            messageKey = "notifications.codexRestartRequired";
-            defaultMessage = "切换成功，请重启客户端以生效";
+            if (isProxyTakeover) {
+              messageKey = "notifications.codexProxySwitchSuccess";
+              defaultMessage = "Codex 已立即切换到供应商";
+            } else {
+              messageKey = "notifications.codexRestartRequired";
+              defaultMessage = "切换成功，请重启客户端以生效";
+            }
           } else if (activeApp === "grokbuild") {
             messageKey = "notifications.grokBuildRestartRequired";
             defaultMessage = "切换成功，请重启 Grok Build 以生效";
