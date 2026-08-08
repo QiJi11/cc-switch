@@ -234,6 +234,7 @@
     "providerSaved": "供應商設定已儲存",
     "providerDeleted": "供應商刪除成功",
     "switchSuccess": "切換成功！",
+    "codexProxySwitchSuccess": "Codex 已立即切換到供應商",
     "codexRestartRequired": "切換成功，請重新啟動客戶端以套用",
     "grokBuildRestartRequired": "切換成功，請重新啟動 Grok Build 以套用",
     "claudeDesktopRestartRequired": "切換成功，重新啟動 Claude Desktop 後生效",
@@ -2567,6 +2568,8 @@
     "toggleFailed": "操作失敗：{{detail}}",
     "inQueue": "已加入",
     "addQueue": "加入",
+    "removeQueue": "移出佇列",
+    "queueAction": "管理故障轉移佇列",
     "priority": {
       "tooltip": "故障轉移優先順序 {{priority}}"
     },

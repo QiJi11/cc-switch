@@ -234,6 +234,7 @@
     "providerSaved": "Provider configuration saved",
     "providerDeleted": "Provider deleted successfully",
     "switchSuccess": "Switch successful!",
+    "codexProxySwitchSuccess": "Codex switched to the provider immediately",
     "codexRestartRequired": "Switched successfully. Restart the client to apply changes.",
     "grokBuildRestartRequired": "Switched successfully. Restart Grok Build to apply changes.",
     "claudeDesktopRestartRequired": "Switched successfully. Restart Claude Desktop to apply changes.",
@@ -2566,6 +2567,8 @@
     "toggleFailed": "Operation failed: {{detail}}",
     "inQueue": "In queue",
     "addQueue": "Add",
+    "removeQueue": "Remove",
+    "queueAction": "Manage failover queue",
     "priority": {
       "tooltip": "Failover priority {{priority}}"
     },

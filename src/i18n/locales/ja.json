@@ -234,6 +234,7 @@
     "providerSaved": "プロバイダー設定を保存しました",
     "providerDeleted": "プロバイダーを削除しました",
     "switchSuccess": "切り替え成功！",
+    "codexProxySwitchSuccess": "Codex をプロバイダーへ即時切り替えました",
     "codexRestartRequired": "切り替えました。反映するにはクライアントを再起動してください",
     "grokBuildRestartRequired": "切り替えました。反映するには Grok Build を再起動してください",
     "claudeDesktopRestartRequired": "切り替えました。反映するには Claude Desktop を再起動してください",
@@ -2566,6 +2567,8 @@
     "toggleFailed": "操作に失敗しました: {{detail}}",
     "inQueue": "キュー内",
     "addQueue": "追加",
+    "removeQueue": "キューから削除",
+    "queueAction": "フェイルオーバーキューを管理",
     "priority": {
       "tooltip": "フェイルオーバー優先度 {{priority}}"
     },

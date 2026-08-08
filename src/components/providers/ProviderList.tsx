@@ -38,6 +38,7 @@ import {
   useFailoverQueue,
   useAddToFailoverQueue,
   useRemoveFromFailoverQueue,
+  useSetAutoFailoverEnabled,
 } from "@/lib/query/failover";
 import {
   useCurrentOmoProviderId,
@@ -151,9 +152,38 @@ export function ProviderList({
   const { data: failoverQueue } = useFailoverQueue(appId);
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
+  const setAutoFailoverEnabled = useSetAutoFailoverEnabled();
 
+  const isFailoverSupportedApp =
+    appId === "claude" ||
+    appId === "codex" ||
+    appId === "gemini" ||
+    appId === "grokbuild";
   const isFailoverModeActive =
-    isProxyTakeover === true && isAutoFailoverEnabled === true;
+    isFailoverSupportedApp &&
+    isProxyTakeover === true &&
+    isAutoFailoverEnabled === true;
+
+  const handleProviderSwitch = useCallback(
+    async (provider: Provider) => {
+      if (isFailoverModeActive) {
+        try {
+          await setAutoFailoverEnabled.mutateAsync({
+            appType: appId,
+            enabled: false,
+          });
+        } catch (error) {
+          console.error(
+            `Failed to disable ${appId} auto failover before manual switch`,
+            error,
+          );
+          return;
+        }
+      }
+      onSwitch(provider);
+    },
+    [appId, isFailoverModeActive, onSwitch, setAutoFailoverEnabled],
+  );
 
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);
@@ -410,7 +440,7 @@ export function ProviderList({
                 isInConfig={isProviderInConfig(provider.id)}
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
-                onSwitch={onSwitch}
+                onSwitch={handleProviderSwitch}
                 onEdit={onEdit}
                 onDelete={onDelete}
                 onRemoveFromConfig={onRemoveFromConfig}

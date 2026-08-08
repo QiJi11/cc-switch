@@ -112,8 +112,6 @@ export function ProviderActions({
       } else {
         onSwitch(); // 添加到配置
       }
-    } else if (isFailoverMode) {
-      onToggleFailover(!isInFailoverQueue);
     } else {
       onSwitch();
     }
@@ -161,27 +159,6 @@ export function ProviderActions({
           "bg-emerald-500 hover:bg-emerald-600 dark:bg-emerald-600 dark:hover:bg-emerald-700",
         icon: <Plus className="h-4 w-4" />,
         text: t("provider.addToConfig", { defaultValue: "添加" }),
-      };
-    }
-
-    if (isFailoverMode) {
-      if (isInFailoverQueue) {
-        return {
-          disabled: false,
-          variant: "secondary" as const,
-          className:
-            "bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-400 dark:hover:bg-blue-900/70",
-          icon: <Check className="h-4 w-4" />,
-          text: t("failover.inQueue", { defaultValue: "已加入" }),
-        };
-      }
-      return {
-        disabled: false,
-        variant: "default" as const,
-        className:
-          "bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
-        icon: <Plus className="h-4 w-4" />,
-        text: t("failover.addQueue", { defaultValue: "加入" }),
       };
     }
 
@@ -279,6 +256,27 @@ export function ProviderActions({
           {buttonState.text}
         </Button>
       </span>
+
+      {isFailoverMode && onToggleFailover && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onToggleFailover(!isInFailoverQueue)}
+          title={t("failover.queueAction", {
+            defaultValue: "管理故障转移队列",
+          })}
+          className="w-fit px-2.5"
+        >
+          {isInFailoverQueue ? (
+            <Minus className="h-4 w-4" />
+          ) : (
+            <Plus className="h-4 w-4" />
+          )}
+          {isInFailoverQueue
+            ? t("failover.removeQueue", { defaultValue: "移出队列" })
+            : t("failover.addQueue", { defaultValue: "加入队列" })}
+        </Button>
+      )}
 
       <div className="flex items-center gap-1">
         <Button
