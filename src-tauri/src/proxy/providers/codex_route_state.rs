@@ -69,6 +69,7 @@ impl CodexRouteState {
     }
 
     /// Start a request without changing the last successful provider.
+    #[cfg(test)]
     pub fn begin_attempt(
         self: &Arc<Self>,
         session_id: impl Into<String>,
@@ -147,6 +148,7 @@ impl CodexRouteState {
 }
 
 impl CodexRouteAttempt {
+    #[cfg(test)]
     pub fn previous_provider_id(&self) -> Option<&str> {
         self.previous_provider_id.as_deref()
     }

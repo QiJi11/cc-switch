@@ -189,10 +189,8 @@ fn collect_readable_history(value: &Value, stats: &mut ReadableHistory) {
                 collect_readable_history(value, stats);
             }
         }
-        Value::String(text) => {
-            if !text.trim().is_empty() {
-                stats.message_count += 1;
-            }
+        Value::String(text) if !text.trim().is_empty() => {
+            stats.message_count += 1;
         }
         Value::Object(object) => collect_readable_object(object, stats),
         _ => {}
@@ -254,16 +252,10 @@ fn user_message_content(message: &serde_json::Map<String, Value>) -> Option<Vec<
 }
 
 fn sanitize_input(input: &mut Value) {
-    match input {
-        Value::Array(items) => {
-            items.retain_mut(|item| sanitize_history_value(item, true));
-        }
-        Value::Object(_) => {
-            if !sanitize_history_value(input, true) {
-                *input = Value::Array(Vec::new());
-            }
-        }
-        _ => {}
+    if let Value::Array(items) = input {
+        items.retain_mut(|item| sanitize_history_value(item, true));
+    } else if input.is_object() && !sanitize_history_value(input, true) {
+        *input = Value::Array(Vec::new());
     }
 }
 
