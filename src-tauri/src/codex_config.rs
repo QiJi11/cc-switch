@@ -11,7 +11,7 @@ use std::fs;
 use std::process::Command;
 use toml_edit::DocumentMut;
 
-pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
+pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "第三方 5.6 Fast";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
@@ -1732,7 +1732,10 @@ mod tests {
         let with_catalog = "model_catalog_json = \"cc-switch-model-catalog.json\"\n";
         let injected = inject_codex_unified_session_bucket(with_catalog).expect("inject");
         assert!(injected.contains("model_catalog_json"));
-        assert!(injected.contains("model_provider = \"custom\""));
+        assert!(injected.contains(&format!(
+            "model_provider = {}",
+            toml_edit::Value::from(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+        )));
 
         // 用户显式指定过 model_provider 的官方配置不被覆盖
         let explicit = "model_provider = \"openai_https\"\n";
@@ -1744,11 +1747,14 @@ mod tests {
     fn unified_session_bucket_skips_conflicting_custom_table() {
         // 残留的非注入形态 custom 表：设置 model_provider 会把官方流量
         // 路由到表里的第三方端点，必须整体拒绝注入。
-        let stale = r#"[model_providers.custom]
+        let stale = format!(
+            r#"[model_providers.{}]
 name = "Relay"
 base_url = "https://relay.example/v1"
-"#;
-        let unchanged = inject_codex_unified_session_bucket(stale).expect("inject");
+"#,
+            toml_edit::Value::from(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+        );
+        let unchanged = inject_codex_unified_session_bucket(&stale).expect("inject");
         assert_eq!(unchanged, stale);
 
         // 已是注入形态的 custom 表（如重复注入）则照常补上 model_provider
@@ -1773,15 +1779,18 @@ base_url = "https://relay.example/v1"
     fn unified_session_bucket_strip_keeps_third_party_custom_entry() {
         // 第三方模板同样用 custom 路由，但条目带 base_url 等差异字段，
         // 形态不等于注入产物，必须原样保留。
-        let third_party = r#"model_provider = "custom"
+        let third_party = format!(
+            r#"model_provider = "{0}"
 
-[model_providers.custom]
+[model_providers."{0}"]
 name = "Relay"
 base_url = "https://relay.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
-"#;
-        let untouched = strip_codex_unified_session_bucket(third_party).expect("strip");
+"#,
+            CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        );
+        let untouched = strip_codex_unified_session_bucket(&third_party).expect("strip");
         assert_eq!(untouched, third_party);
     }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parse as parseToml } from "smol-toml";
-import { getCodexCustomTemplate } from "@/config/codexTemplates";
+import { getCodexCustomTemplate, CODEX_MODEL_PROVIDER_ID } from "@/config/codexTemplates";
 
 describe("Codex custom templates", () => {
   it("does not force Codex Goal mode in the custom provider template", () => {
@@ -12,6 +12,6 @@ describe("Codex custom templates", () => {
 
     expect(template.auth).toEqual({ OPENAI_API_KEY: "" });
     expect(parsed.features?.goals).toBeUndefined();
-    expect(parsed.model_providers?.custom).toBeDefined();
+    expect(parsed.model_providers?.[CODEX_MODEL_PROVIDER_ID]).toBeDefined();
   });
 });

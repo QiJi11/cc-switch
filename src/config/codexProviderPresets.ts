@@ -8,6 +8,7 @@ import type {
   CodexChatReasoning,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
+import { CODEX_MODEL_PROVIDER_ID } from "./codexTemplates";
 
 export interface CodexProviderPreset {
   name: string;
@@ -56,13 +57,14 @@ export function generateThirdPartyConfig(
   modelName = "gpt-5.5",
 ): string {
   const tomlString = (value: string) => JSON.stringify(value);
+  const providerId = tomlString(CODEX_MODEL_PROVIDER_ID);
 
-  return `model_provider = "custom"
+  return `model_provider = ${providerId}
 model = ${tomlString(modelName)}
 model_reasoning_effort = "high"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${providerId}]
 name = ${tomlString(providerName)}
 base_url = ${tomlString(baseUrl)}
 wire_api = "responses"
@@ -399,12 +401,12 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     category: "third_party",
     isOfficial: true,
     auth: generateThirdPartyAuth(""),
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "Azure OpenAI"
 base_url = "https://YOUR_RESOURCE_NAME.openai.azure.com/openai"
 env_key = "OPENAI_API_KEY"
@@ -1117,13 +1119,13 @@ requires_openai_auth = true`,
     apiKeyUrl: "https://apikey.fun/register?aff=CCSwitch",
     category: "third_party",
     auth: generateThirdPartyAuth(""),
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 review_model = "gpt-5.5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "APIKEY.FUN"
 base_url = "https://api.apikey.fun/v1"
 wire_api = "responses"
@@ -1143,13 +1145,13 @@ requires_openai_auth = true`,
     apiKeyUrl: "https://apinebula.com/02rw5X",
     category: "third_party",
     auth: generateThirdPartyAuth(""),
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 review_model = "gpt-5.5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "APINebula"
 base_url = "https://apinebula.com/v1"
 wire_api = "responses"
@@ -1166,11 +1168,11 @@ requires_openai_auth = true`,
     apiKeyUrl: "https://www.atlascloud.ai/console/coding-plan",
     category: "aggregator",
     auth: generateThirdPartyAuth(""),
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "zai-org/glm-5.1"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "AtlasCloud"
 base_url = "https://api.atlascloud.ai/v1"
 wire_api = "responses"
@@ -1194,14 +1196,14 @@ requires_openai_auth = true`,
     apiKeyUrl: "https://sudocode.us",
     category: "third_party",
     auth: generateThirdPartyAuth(""),
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 review_model = "gpt-5.5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_verbosity = "high"
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "sudocode"
 base_url = "https://sudocode.us/v1"
 wire_api = "responses"
@@ -1443,13 +1445,13 @@ requires_openai_auth = true`,
     auth: {
       OPENAI_API_KEY: "",
     },
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 personality = "pragmatic"
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "E-FlowCode"
 base_url = "https://e-flowcode.cc/v1"
 wire_api = "responses"
@@ -1468,12 +1470,12 @@ model_auto_compact_token_limit = 9000000`,
     auth: {
       OPENAI_API_KEY: "",
     },
-    config: `model_provider = "custom"
+    config: `model_provider = ${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}
 model = "gpt-5.5"
 model_reasoning_effort = "medium"
 disable_response_storage = true
 
-[model_providers.custom]
+[model_providers.${JSON.stringify(CODEX_MODEL_PROVIDER_ID)}]
 name = "PIPELLM"
 wire_api = "responses"
 requires_openai_auth = true

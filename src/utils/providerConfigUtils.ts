@@ -527,8 +527,13 @@ const getCodexProviderSectionName = (
   configText: string,
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
-  return providerName ? `model_providers.${providerName}` : undefined;
+  return providerName
+    ? `model_providers.${tomlKeySegment(providerName)}`
+    : undefined;
 };
+
+const tomlKeySegment = (key: string): string =>
+  /^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(key);
 
 const isCustomCodexModelProviderId = (providerName: string): boolean => {
   const id = providerName.trim().toLowerCase();
@@ -540,7 +545,7 @@ const getCodexCustomProviderSectionName = (
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
   return providerName && isCustomCodexModelProviderId(providerName)
-    ? `model_providers.${providerName}`
+    ? `model_providers.${tomlKeySegment(providerName)}`
     : undefined;
 };
 
