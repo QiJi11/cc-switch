@@ -11,6 +11,12 @@ use std::fs;
 use std::process::Command;
 use toml_edit::DocumentMut;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 
@@ -766,10 +772,12 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
 fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
-        let output = match Command::new(&candidate)
-            .args(["debug", "models", "--bundled"])
-            .output()
-        {
+        let mut command = Command::new(&candidate);
+        command.args(["debug", "models", "--bundled"]);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        let output = match command.output() {
             Ok(output) => output,
             Err(err) => {
                 log::debug!("failed to run `{candidate_label} debug models --bundled`: {err}");
