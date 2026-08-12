@@ -421,6 +421,19 @@ export const deleteSession = (
   return true;
 };
 
+export const setCodexSessionProvider = (
+  sessionId: string,
+  providerId: string | null,
+) => {
+  const session = sessionsState.find(
+    (candidate) =>
+      candidate.providerId === "codex" && candidate.sessionId === sessionId,
+  );
+  if (!session) return false;
+  session.pinnedProviderId = providerId;
+  return true;
+};
+
 export const setSessionFixtures = (
   sessions: SessionMeta[],
   messages: Record<string, SessionMessage[]>,

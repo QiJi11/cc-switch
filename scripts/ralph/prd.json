@@ -1,0 +1,606 @@
+{
+  "project": "cc-switch-fork-work",
+  "branchName": "qiji/local-codex-post-switch-runner",
+  "description": "Keep a Codex App thread usable while CC Switch hot-switches among approved providers. Provider-bound encrypted reasoning must not leak across providers; visible messages, attachment references, and completed tool results must remain available, including after local compaction.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Provider-boundary request sanitization",
+      "description": "As a Codex user, I need provider-specific response state removed when a thread is routed to a different upstream.",
+      "priority": 1,
+      "passes": true,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-001-ST-001",
+          "title": "Add a pure Codex handoff sanitizer",
+          "description": "Implement a focused Rust transformer for Responses API payloads at a provider boundary.",
+          "acceptanceCriteria": [
+            "Remove previous_response_id and provider-scoped response item ids on a provider change",
+            "Remove encrypted_content and encrypted-only reasoning or compaction items while preserving readable summaries",
+            "Preserve visible user and assistant messages, attachment references, completed tool calls, and tool outputs",
+            "Do not mutate the original request body when no provider boundary exists",
+            "Unit tests cover positive, negative, nested, compacted, and malformed payloads",
+            "cargo test for the focused proxy module passes"
+          ],
+          "priority": 1,
+          "passes": true,
+          "notes": "Added a pure Cow-based Responses payload sanitizer with focused coverage for provider state, encrypted history, compaction, portable messages/tool results, and malformed payloads.",
+          "dependsOn": [],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/providers/codex_portable_handoff.rs",
+            "src-tauri/src/proxy/providers/mod.rs"
+          ],
+          "touches": [
+            "proxy/codex-request-transform"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-001"
+        }
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Session-aware provider handoff",
+      "description": "As a Codex user, I need the proxy to know when one thread moves between providers and apply the sanitizer exactly at that boundary.",
+      "priority": 2,
+      "passes": true,
+      "notes": "Provider-boundary sanitization is now applied per Responses candidate, and session ownership commits only after a complete non-streaming body or response.completed SSE event.",
+      "subtasks": [
+        {
+          "id": "US-002-ST-001",
+          "title": "Track successful provider per Codex session",
+          "description": "Add bounded in-memory session route state keyed by the existing Codex session id.",
+          "acceptanceCriteria": [
+            "Track session id to last fully successful provider id with a bounded cache",
+            "Update ownership only after a successful completed response, not after headers or partial SSE",
+            "Concurrent threads remain isolated and proxy restart safely forgets route state",
+            "Unit tests cover first request, same provider, provider change, concurrent sessions, and pruning"
+          ],
+          "priority": 2,
+          "passes": true,
+          "notes": "Added a bounded process-local LRU route store whose request attempts update session ownership only when explicitly completed successfully.",
+          "dependsOn": [
+            "US-001-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/providers/codex_route_state.rs",
+            "src-tauri/src/proxy/server.rs",
+            "src-tauri/src/proxy/providers/mod.rs"
+          ],
+          "touches": [
+            "proxy/shared-state"
+          ],
+          "stateWrites": [
+            "in-memory-session-route"
+          ],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-002"
+        },
+        {
+          "id": "US-002-ST-002",
+          "title": "Apply handoff during manual switch and failover",
+          "description": "Wire provider-boundary sanitization into Codex forwarding for both UI hot switches and failover candidates.",
+          "acceptanceCriteria": [
+            "A manual CC Switch provider change sanitizes the next request in the same session",
+            "An automatic retry to a different provider sanitizes the retry body independently",
+            "No retry is attempted on another provider after any response content or tool instruction has been exposed to the client",
+            "The actual successful provider remains synchronized with existing CC Switch UI and tray behavior",
+            "Focused forwarder and handler tests pass"
+          ],
+          "priority": 3,
+          "passes": true,
+          "notes": "Each Codex Responses candidate derives its own handoff body from the original request; completed responses commit the actual provider while partial streams leave prior ownership unchanged.",
+          "dependsOn": [
+            "US-002-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/response_processor.rs",
+            "src-tauri/src/proxy/handlers.rs"
+          ],
+          "touches": [
+            "proxy/failover",
+            "proxy/streaming"
+          ],
+          "stateWrites": [
+            "in-memory-session-route"
+          ],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-002"
+        }
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Portable visible transcript fallback",
+      "description": "As a user resuming a compacted thread, I need the proxy to reconstruct the visible conversation that I would otherwise copy manually.",
+      "priority": 4,
+      "passes": true,
+      "notes": "Compacted provider changes now inject one bounded, delimited visible transcript item, deduplicate the current user input, suppress transcript-bearing body logs, and fail closed when safe local history is unavailable.",
+      "subtasks": [
+        {
+          "id": "US-003-ST-001",
+          "title": "Read a visible transcript from local Codex rollout",
+          "description": "Implement a read-only rollout reader keyed by session id for compacted provider handoffs.",
+          "acceptanceCriteria": [
+            "Resolve the current Codex home dynamically and locate the rollout by exact session UUID",
+            "Read rollout JSONL without modifying sessions, state databases, history indexes, or attachments",
+            "Extract ordered visible user and assistant text, attachment references, and completed tool results",
+            "Exclude system instructions, secrets, encrypted_content, internal reasoning, and raw credentials",
+            "Reject ambiguous, missing, oversized, malformed, or path-escaping input with a typed error",
+            "Fixture tests cover normal, compacted, malformed, missing, and path safety cases"
+          ],
+          "priority": 4,
+          "passes": true,
+          "notes": "Added a read-only, exact-UUID Codex rollout reader with typed fail-closed errors, visible-content extraction, credential redaction, and focused normal/compacted/safety fixtures.",
+          "dependsOn": [
+            "US-002-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/providers/codex_rollout_transcript.rs",
+            "src-tauri/src/proxy/providers/mod.rs"
+          ],
+          "touches": [
+            "proxy/local-rollout-read"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-003"
+        },
+        {
+          "id": "US-003-ST-002",
+          "title": "Inject portable transcript for compacted handoff",
+          "description": "Use the local transcript only when sanitization would otherwise leave insufficient readable history.",
+          "acceptanceCriteria": [
+            "Inject one clearly delimited text context item equivalent to manually copying the visible conversation",
+            "Do not replay historical tool calls as executable calls or duplicate the current user input",
+            "Fail closed with portable_handoff_unavailable when a safe transcript cannot be built",
+            "Do not log transcript contents, attachment contents, or credentials",
+            "Integration tests cover compacted A-to-B handoff and missing transcript failure"
+          ],
+          "priority": 5,
+          "passes": true,
+          "notes": "Added conditional rollout fallback injection, normalized current-input deduplication, stable portable_handoff_unavailable errors, body-log suppression across provider format transforms, and focused integration coverage.",
+          "dependsOn": [
+            "US-003-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/providers/codex_portable_handoff.rs",
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/error.rs"
+          ],
+          "touches": [
+            "proxy/codex-request-transform",
+            "proxy/errors"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-003"
+        }
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "User control and safe defaults",
+      "description": "As a CC Switch user, I need the behavior visible and controllable without creating another switching interface.",
+      "priority": 6,
+      "passes": true,
+      "notes": "Added the default-on portable handoff toggle to the existing Codex App Enhancements section with verified Chinese and English safety copy.",
+      "subtasks": [
+        {
+          "id": "US-004-ST-001",
+          "title": "Persist the portable handoff setting",
+          "description": "Add a backward-compatible setting that defaults on for Codex proxy takeover.",
+          "acceptanceCriteria": [
+            "Rust and TypeScript settings schemas expose codexPortableHandoffOnProviderChange",
+            "Missing legacy values resolve to enabled without rewriting settings during read",
+            "Serialization and settings merge tests pass"
+          ],
+          "priority": 6,
+          "passes": true,
+          "notes": "Added a backward-compatible default-on portable handoff setting across Rust and TypeScript schemas, with explicit-false preservation and form merge coverage.",
+          "dependsOn": [
+            "US-003-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/settings.rs",
+            "src/types.ts",
+            "src/lib/schemas/settings.ts",
+            "src/hooks/useSettingsForm.ts"
+          ],
+          "touches": [
+            "settings/schema"
+          ],
+          "stateWrites": [
+            "settings.json"
+          ],
+          "fileBudget": 4,
+          "splitRequired": false,
+          "sourceStoryId": "US-004"
+        },
+        {
+          "id": "US-004-ST-002",
+          "title": "Expose the setting in existing Codex settings UI",
+          "description": "Add one toggle and plain-language warnings to the existing Codex authentication settings.",
+          "acceptanceCriteria": [
+            "The existing Codex settings page contains a portable handoff toggle",
+            "Chinese and English text explain that visible content is preserved while provider-specific encrypted reasoning is discarded",
+            "No new provider switching panel is introduced",
+            "Frontend typecheck passes"
+          ],
+          "priority": 7,
+          "passes": true,
+          "notes": "Added and browser-verified one toggle in the existing Codex settings UI; both locales explain portable visible context and discarded provider-specific encrypted reasoning.",
+          "dependsOn": [
+            "US-004-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src/components/settings/CodexAuthSettings.tsx",
+            "src/i18n/locales/zh.json",
+            "src/i18n/locales/en.json"
+          ],
+          "touches": [
+            "ui/codex-settings",
+            "i18n"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-004"
+        }
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Regression and deployment readiness",
+      "description": "As the operator, I need evidence that the feature is safe before replacing the installed CC Switch binary.",
+      "priority": 8,
+      "passes": true,
+      "notes": "Full Rust, TypeScript, proxy, failover, settings, provider-service, and Codex history checks passed; a release executable and NSIS installer were produced, with deployment and rollback steps documented. The default MSI bundle remained unavailable because the WiX download timed out.",
+      "subtasks": [
+        {
+          "id": "US-005-ST-001",
+          "title": "Add end-to-end proxy handoff fixtures",
+          "description": "Exercise the three-provider behavior with local fake upstreams only.",
+          "acceptanceCriteria": [
+            "Fixture covers A-to-B manual switch, A 429 to B failover, and B to C switch in one session",
+            "Fixture verifies one session id, no duplicate assistant output, and no duplicate executable tool call",
+            "Fixture verifies secrets and transcript bodies are absent from logs",
+            "No paid or external model request is sent"
+          ],
+          "priority": 8,
+          "passes": true,
+          "notes": "Added a real local-proxy fixture covering A-to-B manual handoff, A 429 to B failover, and B-to-C handoff in one Codex session, including output deduplication and log-secrecy assertions; fixed the HTTP session namespace mismatch exposed by the fixture.",
+          "dependsOn": [
+            "US-004-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/tests/codex_portable_handoff.rs",
+            "src-tauri/src/proxy/tests/mod.rs"
+          ],
+          "touches": [
+            "proxy/integration-tests"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-005"
+        },
+        {
+          "id": "US-005-ST-002",
+          "title": "Run full checks and produce deployment notes",
+          "description": "Complete source-level validation and document the non-disruptive rollout and rollback steps.",
+          "acceptanceCriteria": [
+            "Frontend typecheck, relevant Rust tests, and the production build pass",
+            "Existing CC Switch proxy, failover, settings, and Codex history migration tests remain green",
+            "Deployment notes keep Codex App on one conversation home and leave CLI run homes unchanged",
+            "Rollout requires a backup and defers replacing the running installed binary until Codex App and CC Switch can be closed",
+            "No paid verification is performed without a separate explicit authorization"
+          ],
+          "priority": 9,
+          "passes": true,
+          "notes": "Verified the existing full-check outputs and production artifacts, documented non-disruptive rollout and rollback, preserved the single App conversation home and isolated CLI run homes, and performed no paid verification.",
+          "dependsOn": [
+            "US-005-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "docs/codex-portable-provider-handoff.md",
+            "scripts/ralph/progress.txt"
+          ],
+          "touches": [
+            "docs/deployment"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-005"
+        }
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Wire the handoff toggle and refresh release artifacts",
+      "description": "As the operator, I need the portable handoff setting to control runtime transcript reconstruction while provider-bound state remains safely sanitized.",
+      "priority": 10,
+      "passes": true,
+      "notes": "The runtime setting is wired per request; TypeScript, the full Rust suite, proxy regressions, formatting, and diff checks pass; refreshed Windows EXE/NSIS artifacts were generated with recorded SHA-256 values.",
+      "subtasks": [
+        {
+          "id": "US-006-ST-001",
+          "title": "Apply the portable handoff toggle at request time",
+          "description": "Read the latest setting for each forwarder and use it to control only local transcript reconstruction, never provider-boundary sanitization.",
+          "acceptanceCriteria": [
+            "Each newly created RequestForwarder receives the latest codexPortableHandoffOnProviderChange setting without requiring a proxy restart",
+            "Provider changes always remove previous_response_id, provider-scoped response ids, encrypted_content, and non-portable reasoning or compaction state",
+            "When enabled, the existing rollout transcript fallback and portable_handoff_unavailable behavior remain unchanged",
+            "When disabled, rollout reading and portable transcript injection are skipped while the sanitized request continues",
+            "Focused tests prove the disabled path does not call the transcript reader, does not add the portable marker, and still removes provider-bound state",
+            "Existing enabled, missing-rollout, failover, tool-deduplication, and log-secrecy tests remain green"
+          ],
+          "priority": 10,
+          "passes": true,
+          "notes": "Each RequestForwarder now snapshots the latest persisted portable-handoff setting. Provider changes always sanitize provider-bound state; disabling the setting skips rollout reads and transcript injection while continuing with the sanitized body. Focused and full proxy regressions pass.",
+          "dependsOn": [
+            "US-005-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/handler_context.rs",
+            "src-tauri/src/proxy/tests/codex_portable_handoff.rs"
+          ],
+          "touches": [
+            "proxy/codex-request-transform",
+            "settings/runtime"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-006"
+        },
+        {
+          "id": "US-006-ST-002",
+          "title": "Revalidate and rebuild the Windows release",
+          "description": "Update deployment semantics and regenerate verified release artifacts after the runtime toggle fix.",
+          "acceptanceCriteria": [
+            "Deployment documentation states that disabling the setting keeps safety sanitization but skips local transcript reconstruction",
+            "TypeScript checks, full Rust tests, formatting, and git diff checks pass",
+            "Direct Vite production build, Rust release build, and NSIS bundle complete without using the controlled pnpm wrapper",
+            "Fresh SHA-256 values are recorded for the release executable and NSIS installer",
+            "The running CC Switch installation is not replaced and no paid provider verification is sent",
+            "MSI remains explicitly unverified if WiX is unavailable"
+          ],
+          "priority": 11,
+          "passes": true,
+          "notes": "Updated deployment semantics, passed TypeScript/full Rust/proxy/format/diff checks, regenerated the Windows release and NSIS bundle, and recorded SHA-256 values. MSI/WiX and updater signing remain unverified.",
+          "dependsOn": [
+            "US-006-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "docs/codex-portable-provider-handoff.md",
+            "scripts/ralph/progress.txt"
+          ],
+          "touches": [
+            "docs/deployment",
+            "release/windows"
+          ],
+          "stateWrites": [],
+          "fileBudget": 2,
+          "splitRequired": false,
+          "sourceStoryId": "US-006"
+        }
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Pin Codex providers per conversation",
+      "description": "As a Codex App user, I need different conversations to stay on independently selected providers so multiple quotas can run concurrently without global route changes.",
+      "priority": 12,
+      "passes": false,
+      "notes": "",
+      "subtasks": [
+        {
+          "id": "US-007-ST-001",
+          "title": "Persist conversation provider routes",
+          "description": "Add schema v13 and database access for a canonical Codex session route containing an optional pin and the last successful provider.",
+          "acceptanceCriteria": [
+            "Schema v13 creates codex_session_routes with canonical raw UUID keys, nullable pinned provider, nullable last-success provider, and timestamps",
+            "v12-to-v13, fresh database, backup restore, route upsert/read/clear, provider deletion, and session deletion behaviors are covered",
+            "Clearing or deleting a pin preserves the last-success provider marker for the next safe handoff",
+            "Malformed or non-UUID Codex session ids are rejected without writing a route"
+          ],
+          "priority": 12,
+          "passes": true,
+          "notes": "Added schema v13 and a canonical-UUID Codex session-route DAO with independent pin/last-success updates, provider-pin cleanup, session cleanup, SQL backup restore coverage, and strict malformed-id rejection.",
+          "dependsOn": [
+            "US-006-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/database/mod.rs",
+            "src-tauri/src/database/schema.rs",
+            "src-tauri/src/database/dao/codex_session_routes.rs",
+            "src-tauri/src/database/dao/mod.rs",
+            "src-tauri/src/database/tests.rs"
+          ],
+          "touches": [
+            "database/schema",
+            "database/codex-session-routes"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 5,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-002",
+          "title": "Route pinned conversations independently",
+          "description": "Resolve an optional session pin before provider selection and persist successful route ownership without mutating the global provider.",
+          "acceptanceCriteria": [
+            "A pinned Codex session selects exactly its pinned provider regardless of the global failover queue, while an unpinned session preserves existing routing",
+            "Pinned 429, timeout, and upstream errors never attempt another provider",
+            "Pinned successes do not update global current-provider settings, tray state, or other sessions",
+            "Missing or unreadable pinned providers fail closed with HTTP 503 and stable code session_provider_unavailable",
+            "Last successful provider survives proxy restart and drives the existing portable handoff sanitizer and transcript behavior",
+            "An explicit first pin with unknown ownership is handled conservatively as a provider boundary"
+          ],
+          "priority": 13,
+          "passes": true,
+          "notes": "Pinned Codex sessions now resolve one provider before global routing, bypass circuit state, never fail over, preserve global provider/tray state, persist completed ownership, and fail closed with a stable 503 when route or provider lookup is unavailable.",
+          "dependsOn": [
+            "US-007-ST-001"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/provider_router.rs",
+            "src-tauri/src/proxy/handler_context.rs",
+            "src-tauri/src/proxy/forwarder.rs",
+            "src-tauri/src/proxy/providers/codex_route_state.rs",
+            "src-tauri/src/proxy/error.rs",
+            "src-tauri/src/proxy/handlers.rs",
+            "src-tauri/src/proxy/response_processor.rs"
+          ],
+          "touches": [
+            "proxy/provider-selection",
+            "proxy/codex-handoff",
+            "proxy/global-provider-sync"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 7,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-003",
+          "title": "Expose conversation route commands",
+          "description": "Return route metadata with Codex sessions and add a validated command to set or clear a conversation pin.",
+          "acceptanceCriteria": [
+            "SessionMeta exposes pinnedProviderId and lastSuccessfulProviderId for Codex sessions",
+            "set_codex_session_provider validates the session UUID and selected Codex provider before saving, and null clears only the pin",
+            "Successful local session deletion removes its route row",
+            "Deleting a Codex provider clears matching pins without discarding last-success ownership",
+            "Tauri command registration and TypeScript API types compile"
+          ],
+          "priority": 14,
+          "passes": true,
+          "notes": "Session list responses now include persisted Codex route metadata, the validated set_codex_session_provider command sets or clears only the pin, and successful session/provider deletion cleans pins without losing last-success ownership.",
+          "dependsOn": [
+            "US-007-ST-002"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/commands/session_manager.rs",
+            "src-tauri/src/session_manager/mod.rs",
+            "src-tauri/src/services/provider/mod.rs",
+            "src-tauri/src/lib.rs",
+            "src/types.ts",
+            "src/lib/api/sessions.ts"
+          ],
+          "touches": [
+            "tauri/session-commands",
+            "provider/delete-cleanup",
+            "frontend/session-api"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 6,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-004",
+          "title": "Add the conversation provider selector",
+          "description": "Let users set a Codex conversation pin from the existing session manager and see its route in the list.",
+          "acceptanceCriteria": [
+            "Selected Codex conversations show a provider select before the existing action buttons; non-Codex sessions do not",
+            "The select contains Follow global routing plus every configured Codex provider with advisory health state",
+            "Saving immediately updates the session query and states that the next request changes while an in-flight request is unaffected",
+            "Session rows show a Global badge or the pinned provider name",
+            "Chinese and English strings are complete, TypeScript passes, and the layout is verified in the in-app browser"
+          ],
+          "priority": 15,
+          "passes": true,
+          "notes": "Implemented the Codex-only session provider selector, route badges, advisory health states, immediate query refresh, localized strings, and observable UI tests. TypeScript, formatting, 408 frontend tests with a 20s timeout, and headless browser layout verification passed. The repository's default 5s App integration timeout remains too short on this machine (the slow test takes 5.8-19.7s under load), but all assertions pass with the explicit timeout.",
+          "dependsOn": [
+            "US-007-ST-003"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src/components/sessions/SessionManagerPage.tsx",
+            "src/components/sessions/SessionItem.tsx",
+            "src/lib/query/queries.ts",
+            "src/i18n/locales/zh.json",
+            "src/i18n/locales/en.json"
+          ],
+          "touches": [
+            "ui/session-manager",
+            "frontend/session-query",
+            "i18n"
+          ],
+          "stateWrites": [
+            "cc-switch.db/codex_session_routes"
+          ],
+          "fileBudget": 5,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        },
+        {
+          "id": "US-007-ST-005",
+          "title": "Verify concurrent routes and rebuild Windows artifacts",
+          "description": "Exercise independent pinned sessions with local upstreams, document behavior, and produce final Windows artifacts without installing them.",
+          "acceptanceCriteria": [
+            "A local fixture runs three distinct Codex sessions concurrently against three pinned providers and proves no global provider mutation",
+            "The fixture covers manual A-to-B repinning, pinned 429 without fallback, restart persistence, unpinning, tool deduplication, and log secrecy",
+            "TypeScript, full Rust, formatting, diff, direct Vite, Rust release, and NSIS-only bundle checks pass",
+            "Fresh EXE and NSIS SHA-256 values and deployment semantics are documented",
+            "No paid request is sent, Codex App and CLI HOME behavior is unchanged, and the running installation is not replaced"
+          ],
+          "priority": 16,
+          "passes": true,
+          "notes": "Clean-worktree verification passed: three pinned sessions routed independently, restart repin and unpin behavior passed, frontend 408/408 and Rust 1806/0/2 plus all integration targets passed, direct Vite and Rust release builds passed, and NSIS was rebuilt without updater artifacts. Final SHA-256 values are documented; MSI/WiX, updater signing, and paid-provider requests remain intentionally unverified.",
+          "dependsOn": [
+            "US-007-ST-004"
+          ],
+          "parallelSafe": false,
+          "estimatedFiles": [
+            "src-tauri/src/proxy/tests/codex_portable_handoff.rs",
+            "docs/codex-portable-provider-handoff.md",
+            "scripts/ralph/progress.txt"
+          ],
+          "touches": [
+            "proxy/integration-tests",
+            "docs/deployment",
+            "release/windows"
+          ],
+          "stateWrites": [],
+          "fileBudget": 3,
+          "splitRequired": false,
+          "sourceStoryId": "US-007"
+        }
+      ]
+    }
+  ],
+  "dirtyBaseline": "Dirty baseline continuation on branch qiji/local-codex-post-switch-runner at 2026-07-17T22:48:16.7610764+08:00."
+}

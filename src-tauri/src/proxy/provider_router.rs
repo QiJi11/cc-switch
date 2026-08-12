@@ -29,6 +29,35 @@ impl ProviderRouter {
         }
     }
 
+    /// Resolve one explicit session pin without consulting failover order or circuit state.
+    pub fn select_pinned_provider(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<Option<Provider>, AppError> {
+        self.db.get_provider_by_id(provider_id, app_type)
+    }
+
+    /// Resolve an explicit Codex model alias to the one provider that
+    /// advertises it in its model catalog.
+    pub fn select_codex_catalog_provider(&self, model: &str) -> Result<Option<Provider>, AppError> {
+        let mut matches = self
+            .db
+            .get_all_providers("codex")?
+            .into_values()
+            .filter(|provider| {
+                super::providers::codex_provider_is_multi_provider_gateway(provider)
+                    && super::providers::codex_provider_catalog_contains_model(provider, model)
+            });
+        let selected = matches.next();
+        if matches.next().is_some() {
+            return Err(AppError::InvalidInput(format!(
+                "Codex model alias is advertised by multiple providers: {model}"
+            )));
+        }
+        Ok(selected)
+    }
+
     /// 选择可用的供应商（支持故障转移）
     ///
     /// 返回按优先级排序的可用供应商列表：
@@ -423,6 +452,134 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pinned_provider_bypasses_global_failover_order() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let mut provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        provider_a.sort_index = Some(1);
+        let mut provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+        provider_b.sort_index = Some(2);
+        db.save_provider("codex", &provider_a).unwrap();
+        db.save_provider("codex", &provider_b).unwrap();
+        db.add_to_failover_queue("codex", "a").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db);
+        let global = router.select_providers("codex").await.unwrap();
+        let pinned = router
+            .select_pinned_provider("codex", "b")
+            .unwrap()
+            .expect("pinned provider should exist");
+
+        assert_eq!(
+            global
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(pinned.id, "b");
+        assert!(router
+            .select_pinned_provider("codex", "missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn codex_catalog_model_resolves_one_explicit_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let direct = Provider::with_id("direct".to_string(), "Direct".to_string(), json!({}), None);
+        let gateway = Provider::with_id(
+            "gateway".to_string(),
+            "Gateway".to_string(),
+            json!({
+                "ccSwitchMultiProviderGateway": true,
+                "modelCatalog": {
+                    "models": [{"model": "cc-12345678/gpt-5.6-sol"}]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &direct).unwrap();
+        db.save_provider("codex", &gateway).unwrap();
+
+        let router = ProviderRouter::new(db);
+
+        assert_eq!(
+            router
+                .select_codex_catalog_provider("cc-12345678/gpt-5.6-sol")
+                .unwrap()
+                .expect("gateway provider")
+                .id,
+            "gateway"
+        );
+        assert!(router
+            .select_codex_catalog_provider("cc-missing/gpt-5.6-sol")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn codex_catalog_model_rejects_ambiguous_providers() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        for id in ["gateway-a", "gateway-b"] {
+            db.save_provider(
+                "codex",
+                &Provider::with_id(
+                    id.to_string(),
+                    id.to_string(),
+                    json!({
+                        "ccSwitchMultiProviderGateway": true,
+                        "modelCatalog": {
+                            "models": [{"model": "cc-12345678/gpt-5.6-sol"}]
+                        }
+                    }),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+
+        let error = ProviderRouter::new(db)
+            .select_codex_catalog_provider("cc-12345678/gpt-5.6-sol")
+            .expect_err("ambiguous aliases must fail closed");
+
+        assert!(error.to_string().contains("multiple providers"));
+    }
+
+    #[test]
+    fn codex_catalog_model_ignores_unmarked_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let ordinary_provider = Provider::with_id(
+            "ordinary".to_string(),
+            "Ordinary".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [{"model": "cc-12345678/gpt-5.6-sol"}]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &ordinary_provider).unwrap();
+
+        let selected = ProviderRouter::new(db)
+            .select_codex_catalog_provider("cc-12345678/gpt-5.6-sol")
+            .unwrap();
+
+        assert!(selected.is_none());
     }
 
     #[tokio::test]

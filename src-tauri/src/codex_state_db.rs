@@ -79,11 +79,19 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn toml_string_for_path(path: &Path) -> String {
+        let escaped = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+
     #[test]
     fn includes_config_sqlite_home() {
         let temp = tempdir().expect("tempdir");
         let sqlite_home = temp.path().join("sqlite-home");
-        let config_text = format!("sqlite_home = \"{}\"\n", sqlite_home.display());
+        let config_text = format!("sqlite_home = {}\n", toml_string_for_path(&sqlite_home));
 
         let paths = codex_state_db_paths(temp.path(), &config_text);
 

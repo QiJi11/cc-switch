@@ -24,8 +24,10 @@ import {
 } from "lucide-react";
 import {
   useDeleteSessionMutation,
+  useProvidersQuery,
   useSessionMessagesQuery,
   useSessionsQuery,
+  useSetCodexSessionProviderMutation,
 } from "@/lib/query";
 import { sessionsApi } from "@/lib/api";
 import type { SessionMeta } from "@/types";
@@ -57,6 +59,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 import { isMac } from "@/lib/platform";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { SessionItem } from "./SessionItem";
+import { CodexSessionProviderSelect } from "./CodexSessionProviderSelect";
 import { SessionMessageItem } from "./SessionMessageItem";
 import { SessionTocDialog, SessionTocSidebar } from "./SessionToc";
 import {
@@ -189,7 +192,12 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data, isLoading, refetch } = useSessionsQuery();
+  const { data: codexProvidersData } = useProvidersQuery("codex");
   const sessions = data ?? [];
+  const codexProviders = useMemo(
+    () => Object.values(codexProvidersData?.providers ?? {}),
+    [codexProvidersData?.providers],
+  );
   const detailRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [activeMessageIndex, setActiveMessageIndex] = useState<number | null>(
@@ -325,6 +333,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       selectedSession?.sourcePath,
     );
   const deleteSessionMutation = useDeleteSessionMutation();
+  const setCodexProviderMutation = useSetCodexSessionProviderMutation();
   const isDeleting = deleteSessionMutation.isPending || isBatchDeleting;
 
   const virtualizer = useVirtualizer({
@@ -678,6 +687,24 @@ export function SessionManagerPage({ appId }: { appId: string }) {
     setExpandedDirectoryGroups(new Set());
   };
 
+  const getCodexRouteLabel = (session: SessionMeta) => {
+    if (session.providerId !== "codex") return undefined;
+    if (!session.pinnedProviderId) {
+      return t("sessionManager.globalRouteBadge", {
+        defaultValue: "全局",
+      });
+    }
+
+    return (
+      codexProviders.find(
+        (provider) => provider.id === session.pinnedProviderId,
+      )?.name ??
+      t("sessionManager.unknownPinnedProvider", {
+        defaultValue: "未知供应商",
+      })
+    );
+  };
+
   const renderSessionItem = (session: SessionMeta) => {
     const sessionKey = getSessionKey(session);
     const isSelected = selectedKey !== null && sessionKey === selectedKey;
@@ -689,6 +716,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
         isSelected={isSelected}
         selectionMode={selectionMode}
         searchQuery={search}
+        routeLabel={getCodexRouteLabel(session)}
         isChecked={selectedSessionKeys.has(sessionKey)}
         isCheckDisabled={!session.sourcePath}
         onSelect={setSelectedKey}
@@ -1534,6 +1562,19 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                   })}
                             </TooltipContent>
                           </Tooltip>
+                        )}
+                        {isCodexSession && (
+                          <CodexSessionProviderSelect
+                            pinnedProviderId={selectedSession.pinnedProviderId}
+                            providers={codexProviders}
+                            disabled={setCodexProviderMutation.isPending}
+                            onChange={(providerId) =>
+                              setCodexProviderMutation.mutate({
+                                sessionId: selectedSession.sessionId,
+                                providerId,
+                              })
+                            }
+                          />
                         )}
                         <Tooltip>
                           <TooltipTrigger asChild>

@@ -385,6 +385,107 @@ command = "say"
     );
 }
 
+/// Regression: normal Codex UI switch must not invoke the legacy Windows
+/// post-switch runner (`%USERPROFILE%\Scripts\codex-app-shell\repair-fast.ps1`).
+/// That runner blocked switch_normal for up to 15s writing a mirror that new
+/// Codex sessions no longer need; it is manual-repair only.
+#[cfg(windows)]
+#[test]
+fn switch_provider_codex_does_not_run_legacy_repair_fast() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    enable_codex_official_auth_preservation();
+    let home = ensure_test_home();
+
+    // Plant a marker-writing stand-in for the legacy post-switch script under
+    // the isolated USERPROFILE that ensure_test_home() configures.
+    let marker_path = home.join("repair-fast-marker.txt");
+    if marker_path.exists() {
+        std::fs::remove_file(&marker_path).expect("clear stale marker");
+    }
+    let script_dir = home.join("Scripts").join("codex-app-shell");
+    std::fs::create_dir_all(&script_dir).expect("create script dir");
+    let script_path = script_dir.join("repair-fast.ps1");
+    std::fs::write(
+        &script_path,
+        format!(
+            "param([switch]$Quiet)\nSet-Content -LiteralPath '{}' -Value 'ran'\nexit 0\n",
+            marker_path.display()
+        ),
+    )
+    .expect("write marker repair-fast.ps1");
+
+    let legacy_auth = json!({"OPENAI_API_KEY": "legacy-key"});
+    let legacy_config = r#"[mcp_servers.legacy]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+        .expect("seed existing codex live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "stale"},
+                    "config": "stale-config"
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Latest".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "fresh-key"},
+                    "config": r#"[mcp_servers.latest]
+type = "stdio"
+command = "say"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let app_state = create_test_state_with_config(&config).expect("create test state");
+
+    switch_provider_test_hook(&app_state, AppType::Codex, "new-provider")
+        .expect("switch provider should succeed without invoking repair-fast");
+
+    assert!(
+        !marker_path.exists(),
+        "legacy repair-fast.ps1 must not run on normal Codex provider switch; marker at {} was written",
+        marker_path.display()
+    );
+
+    let current_id = app_state
+        .db
+        .get_current_provider(AppType::Codex.as_str())
+        .expect("get current provider");
+    assert_eq!(
+        current_id.as_deref(),
+        Some("new-provider"),
+        "current provider should be updated even without post-switch runner"
+    );
+
+    let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert!(
+        config_text.contains("mcp_servers.latest"),
+        "live config.toml should reflect the switched provider"
+    );
+}
+
 #[test]
 fn switch_provider_missing_provider_returns_error() {
     let _guard = test_mutex().lock().expect("acquire test mutex");

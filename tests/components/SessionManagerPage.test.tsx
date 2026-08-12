@@ -8,10 +8,12 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
 import { sessionsApi } from "@/lib/api/sessions";
 import type { SessionMessage, SessionMeta } from "@/types";
+import { server } from "../msw/server";
 import { setSessionFixtures } from "../msw/state";
 
 const toastSuccessMock = vi.fn();
@@ -247,6 +249,103 @@ describe("SessionManagerPage", () => {
     expect(screen.queryByText("Alpha Session")).not.toBeInTheDocument();
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
+  });
+
+  it("pins a Codex session to a provider and can return it to global routing", async () => {
+    renderPage();
+
+    const providerSelect = await screen.findByRole("combobox", {
+      name: /供应商：跟随全局路由/i,
+    });
+    expect(screen.getAllByText("全局").length).toBeGreaterThan(0);
+
+    await userEvent.click(providerSelect);
+    expect(
+      await screen.findByRole("option", { name: /Codex Default.*正常/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("option", { name: /Codex Secondary/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", {
+          name: /供应商：Codex Secondary/i,
+        }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText("Codex Secondary").length).toBeGreaterThan(0);
+    expect(toastSuccessMock).toHaveBeenCalledWith("供应商已更新", {
+      description: "下一次请求生效，当前请求不受影响",
+    });
+
+    await userEvent.click(
+      screen.getByRole("combobox", {
+        name: /供应商：Codex Secondary/i,
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("option", { name: /跟随全局路由/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", {
+          name: /供应商：跟随全局路由/i,
+        }),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("shows the provider control only for Codex sessions", async () => {
+    renderPage("all");
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Claude Session" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("combobox", { name: /供应商：/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Alpha Session/i }));
+
+    expect(
+      await screen.findByRole("combobox", {
+        name: /供应商：跟随全局路由/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the previous route when saving the Codex provider fails", async () => {
+    server.use(
+      http.post(
+        "http://tauri.local/set_codex_session_provider",
+        () => new HttpResponse("route write failed", { status: 500 }),
+      ),
+    );
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("combobox", {
+        name: /供应商：跟随全局路由/i,
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("option", { name: /Codex Secondary/i }),
+    );
+
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "保存供应商失败：route write failed",
+      ),
+    );
+    expect(
+      screen.getByRole("combobox", {
+        name: /供应商：跟随全局路由/i,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("removes a deleted session from filtered search results", async () => {

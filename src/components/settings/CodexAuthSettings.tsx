@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { History, KeyRound } from "lucide-react";
+import { History, KeyRound, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import { ToggleRow } from "@/components/ui/toggle-row";
@@ -102,6 +102,18 @@ export function CodexAuthSettings({
         checked={settings.preserveCodexOfficialAuthOnSwitch ?? false}
         onCheckedChange={(value) =>
           onChange({ preserveCodexOfficialAuthOnSwitch: value })
+        }
+      />
+
+      <ToggleRow
+        icon={<ShieldCheck className="h-4 w-4 text-teal-500" />}
+        title={t("settings.codexPortableHandoffOnProviderChange")}
+        description={t(
+          "settings.codexPortableHandoffOnProviderChangeDescription",
+        )}
+        checked={settings.codexPortableHandoffOnProviderChange ?? true}
+        onCheckedChange={(value) =>
+          onChange({ codexPortableHandoffOnProviderChange: value })
         }
       />
 

@@ -989,6 +989,13 @@ base_url = "http://localhost:8080"
         crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some("p1"))
             .expect("set local current provider");
 
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("set test proxy config to an ephemeral port");
+
         // Claude Desktop keeps backup state from takeover startup; this sentinel only
         // marks takeover as active so provider updates rewrite the 3P profile.
         db.save_live_backup("claude-desktop", "{}")
@@ -1005,11 +1012,12 @@ base_url = "http://localhost:8080"
                 .expect("update app proxy config");
         }
 
-        state
+        let server_info = state
             .proxy_service
             .start()
             .await
             .expect("start proxy service");
+        let port = server_info.port;
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -1053,7 +1061,7 @@ base_url = "http://localhost:8080"
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("http://127.0.0.1:{port}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2280,6 +2288,9 @@ impl ProviderService {
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
         write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        // Legacy post-switch runner (Windows repair-fast.ps1 / ccswitch-current mirror)
+        // is intentionally NOT invoked here. New Codex sessions materialize state on
+        // startup; the mirror is only for manual repair and must not block UI switches.
 
         // Hermes is additive, so "switching" doesn't overwrite a live config file
         // — we instead update the top-level `model:` section to point at this

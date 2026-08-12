@@ -3,6 +3,42 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use cc_switch_lib::{update_settings, AppSettings, AppState, Database, MultiAppConfig};
 
+const TEST_BROWSER_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn write_browser_test_runtime(home: &Path) {
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create test Codex directory");
+    std::fs::write(
+        codex_dir.join("browser-client-trust.json"),
+        format!(r#"{{"schemaVersion":1,"trustedBrowserClientSha256":["{TEST_BROWSER_HASH}"]}}"#),
+    )
+    .expect("write browser trust fixture");
+
+    let runtime_dir = home
+        .join(".prodex")
+        .join("manual-homes")
+        .join("ccswitch-current");
+    std::fs::create_dir_all(&runtime_dir).expect("create browser runtime directory");
+    std::fs::write(
+        runtime_dir.join("config.toml"),
+        format!(
+            r#"[mcp_servers.node_repl]
+command = "node-repl-test"
+args = []
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NODE_PATH = "node"
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "{TEST_BROWSER_HASH}"
+
+[plugins."browser@openai-bundled"]
+enabled = true
+"#
+        ),
+    )
+    .expect("write browser runtime fixture");
+}
+
 /// 为测试设置隔离的 HOME 目录，避免污染真实用户数据。
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
@@ -18,6 +54,7 @@ pub fn ensure_test_home() -> &'static Path {
         std::env::set_var("HOME", &base);
         #[cfg(windows)]
         std::env::set_var("USERPROFILE", &base);
+        write_browser_test_runtime(&base);
         base
     })
     .as_path()
@@ -49,6 +86,7 @@ pub fn reset_test_fs() {
 
     // 重置内存中的设置缓存，确保测试环境不受上一次调用影响
     let _ = update_settings(AppSettings::default());
+    write_browser_test_runtime(home);
 }
 
 #[allow(dead_code)]

@@ -638,7 +638,7 @@ fn build_tool_action_line(
         // (npm/pnpm)或 .exe(volta),静态命令头部是 `npm`(也是 .cmd)、`py` 等——
         // 全部加 `call ` 前缀,风格统一且语义正确。含空格的头部已被 `win_quote_path_for_batch`
         // 加上双引号,call 对带引号的路径解析正常。
-        return Ok(format!("call {command}"));
+        Ok(format!("call {command}"))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1069,6 +1069,7 @@ fn default_flag_for_shell(shell: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fallback_user_shell() -> &'static str {
     if cfg!(target_os = "macos") {
         "/bin/zsh"
@@ -1077,6 +1078,7 @@ fn fallback_user_shell() -> &'static str {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn valid_user_shell_path(shell: &str) -> bool {
     if shell.is_empty()
         || !shell.starts_with('/')
@@ -1100,11 +1102,13 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
 /// 获取用户默认 shell 的完整路径；异常或被污染的 SHELL 回退到平台默认值。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn get_user_shell() -> String {
     std::env::var("SHELL")
         .ok()
@@ -1113,6 +1117,7 @@ fn get_user_shell() -> String {
 }
 
 /// 构建 exec 行：引号保护 shell 路径，交还用户 shell 让其按默认规则加载 rc 配置。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     let quoted_shell = shell_single_quote(shell);
 
@@ -1132,6 +1137,7 @@ fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
 }
 
 /// 构建 provider 命令行：通过用户 shell 的交互模式执行，确保 GUI 启动的终端也加载用户 PATH。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_provider_command_line(shell: &str, config_path: &str, cwd: Option<&Path>) -> String {
     let claude_command = format!("claude --settings {}", shell_single_quote(config_path));
     let command = cwd
@@ -1152,6 +1158,7 @@ fn build_provider_command_line(shell: &str, config_path: &str, cwd: Option<&Path
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn provider_command_flag_for_shell(shell: &str) -> &'static str {
     match shell.rsplit('/').next().unwrap_or(shell) {
         "dash" | "sh" => "-c",
@@ -1160,6 +1167,7 @@ fn provider_command_flag_for_shell(shell: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_final_shell_cd_command(shell: &str, cwd: Option<&Path>) -> String {
     if matches!(shell.rsplit('/').next().unwrap_or(shell), "zsh") {
         return String::new();
@@ -2246,9 +2254,8 @@ fn package_manager_anchored_command_from_paths(
 ///    且在 PATH 里比 nvm/homebrew 更靠前,用 npm 升级会装到别处且被原生那份遮蔽。
 /// ③ Homebrew formula（真身在 `Cellar/<formula>/`）→ `<bin_path 同目录>/brew upgrade <formula>`;
 ///    formula 由 Homebrew 拥有,避免 self-update 尝试改动包管理器管理的安装。
-/// ④ 其余支持官方自升级的工具 → `<bin_path 绝对> update/upgrade || <原锚定包管理器命令>`；
-///    Codex 的 self-update 只在部分 release 可用,所以保留 npm/brew/bun/volta fallback。
-/// ⑤ 不支持官方自升级的 npm 全局包(例如 Gemini CLI) → 锚定到"那处 bin 目录的 npm"。
+/// ④ 其余支持官方自升级的工具 → `<bin_path 绝对> update/upgrade || <原锚定包管理器命令>`。
+/// ⑤ 不走官方自升级的 npm 全局包(例如 Codex、Gemini CLI) → 锚定到"那处 bin 目录的 npm"。
 #[cfg(not(target_os = "windows"))]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
     let real_lower = real_target.to_ascii_lowercase();
@@ -2731,7 +2738,7 @@ fn launch_terminal_with_env(
     #[cfg(target_os = "windows")]
     {
         launch_windows_terminal(&temp_dir, &config_file, cwd)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -3252,6 +3259,7 @@ del \"%~f0\" >nul 2>&1
     result
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -3830,7 +3838,7 @@ mod tests {
         }
 
         #[test]
-        fn volta_windows_uses_volta_install() {
+        fn codex_volta_windows_uses_volta_install() {
             // tempdir 路径里不含 "volta" 子串,所以在 tempdir 下手建一个 `Volta` 子目录
             // 才能让 `infer_install_source` 通过路径 normalize 后命中 `/volta/` 分支。
             // sibling 候选顺序 `[exe, cmd]`——Volta 是 Rust 写的 native binary,首选 .exe。
@@ -3838,16 +3846,12 @@ mod tests {
             let (_dir, sub, bin_path) = setup_sibling("Volta", "codex.cmd", &["volta.exe"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let volta_full = format!("{}\\volta.exe", sub.to_string_lossy());
-            let expected = format!(
-                "{} update || call {} install @openai/codex",
-                expect_quoted_path(&bin_path),
-                expect_quoted_path(&volta_full)
-            );
+            let expected = format!("{} install @openai/codex", expect_quoted_path(&volta_full));
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
         }
 
         #[test]
-        fn pnpm_windows_uses_pnpm_add() {
+        fn codex_pnpm_windows_uses_pnpm_add() {
             // bin_path 落 `%LOCALAPPDATA%\pnpm\codex.cmd`,sibling 有 `pnpm.cmd` → 锚定到
             // `<dir>\pnpm.cmd add -g @openai/codex@latest`。用 add+@latest 而非 update,
             // 兼容"之前没通过 pnpm 装过"的幂等性场景。
@@ -3855,8 +3859,7 @@ mod tests {
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let pnpm_full = format!("{}\\pnpm.cmd", sub.to_string_lossy());
             let expected = format!(
-                "{} update || call {} add -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} add -g @openai/codex@latest",
                 expect_quoted_path(&pnpm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
@@ -3882,28 +3885,25 @@ mod tests {
         }
 
         #[test]
-        fn npm_windows_default_branch() {
+        fn codex_npm_windows_default_branch() {
             // 任意 system 类路径(不命中 volta/pnpm)→ 兜底 sibling npm.cmd 锚定。
             // 模拟 nvm-windows 的实际形态:`<NVM_HOME>\v22.0.0\codex.cmd`。
             let (_dir, sub, bin_path) = setup_sibling("v22.0.0", "codex.cmd", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
             let expected = format!(
-                "{} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
         }
 
         #[test]
-        fn windows_no_sibling_uses_cli_update_without_package_fallback() {
-            // sibling npm.cmd 不存在(纯独立二进制)时,仍可锚定到 CLI 自身跑官方 update。
-            // 只是没有包管理器 fallback。
+        fn codex_windows_no_sibling_returns_none_without_package_fallback() {
+            // Codex 不再跑会假成功的 self-update；无 sibling 包管理器时交给静态 fallback。
             let (_dir, _sub, bin_path) = setup_sibling("", "codex.cmd", &[]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
-            let expected = format!("{} update", expect_quoted_path(&bin_path));
-            assert_eq!(cmd.as_deref(), Some(expected.as_str()));
+            assert_eq!(cmd, None);
         }
 
         #[test]
@@ -3978,8 +3978,7 @@ mod tests {
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
             let expected = format!(
-                "{} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
@@ -4002,8 +4001,7 @@ mod tests {
             // 会让 expected 漏引号、假失败)。
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
             let expected = format!(
-                "call {} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "call {} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(batch_line, expected);

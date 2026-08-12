@@ -332,7 +332,7 @@ export const useDeleteSessionMutation = () => {
       await sessionsApi.delete(input);
       return input;
     },
-    onSuccess: async (input) => {
+    onSuccess: (input) => {
       queryClient.setQueryData<SessionMeta[]>(["sessions"], (current) =>
         (current ?? []).filter(
           (session) =>
@@ -347,7 +347,7 @@ export const useDeleteSessionMutation = () => {
         queryKey: ["sessionMessages", input.providerId, input.sourcePath],
       });
 
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
 
       toast.success(
         t("sessionManager.sessionDeleted", {
@@ -360,6 +360,53 @@ export const useDeleteSessionMutation = () => {
       toast.error(
         t("sessionManager.deleteFailed", {
           defaultValue: "删除会话失败: {{error}}",
+          error: detail,
+        }),
+      );
+    },
+  });
+};
+
+export const useSetCodexSessionProviderMutation = () => {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: async (input: {
+      sessionId: string;
+      providerId: string | null;
+    }) => {
+      await sessionsApi.setCodexProvider(input.sessionId, input.providerId);
+      return input;
+    },
+    onSuccess: async (input) => {
+      queryClient.setQueryData<SessionMeta[]>(["sessions"], (current) =>
+        (current ?? []).map((session) =>
+          session.providerId === "codex" &&
+          session.sessionId === input.sessionId
+            ? { ...session, pinnedProviderId: input.providerId }
+            : session,
+        ),
+      );
+
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+
+      toast.success(
+        t("sessionManager.providerBindingSaved", {
+          defaultValue: "供应商已更新",
+        }),
+        {
+          description: t("sessionManager.providerBindingSavedHint", {
+            defaultValue: "下一次请求生效，当前请求不受影响",
+          }),
+        },
+      );
+    },
+    onError: (error: Error) => {
+      const detail = extractErrorMessage(error) || t("common.unknown");
+      toast.error(
+        t("sessionManager.providerBindingFailed", {
+          defaultValue: "保存供应商失败：{{error}}",
           error: detail,
         }),
       );

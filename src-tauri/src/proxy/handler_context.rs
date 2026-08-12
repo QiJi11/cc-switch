@@ -64,6 +64,10 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    /// Whether this request is pinned to one Codex provider.
+    pub session_provider_pinned: bool,
+    /// Repin this Codex session only after the selected gateway response completes.
+    pub session_repin_on_success: bool,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -118,7 +122,9 @@ impl RequestContext {
             .to_string();
 
         // 提取 Session ID
-        let session_result = extract_session_id(headers, body, app_type_str);
+        let session_result = extract_session_id(headers, body, app_type_str).map_err(|_| {
+            ProxyError::InvalidRequest("conflicting or invalid Codex session identity".to_string())
+        })?;
         let session_id = session_result.session_id.clone();
 
         log::debug!(
@@ -129,19 +135,56 @@ impl RequestContext {
             session_result.client_provided
         );
 
-        // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
-        // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
-            .provider_router
-            .select_providers(app_type_str)
-            .await
-            .map_err(|e| match e {
-                crate::error::AppError::AllProvidersCircuitOpen => {
-                    ProxyError::AllProvidersCircuitOpen
-                }
-                crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
-                _ => ProxyError::DatabaseError(e.to_string()),
-            })?;
+        let pinned_provider_id = load_codex_session_pin(
+            state,
+            &app_type,
+            &session_id,
+            session_result.client_provided,
+        )?;
+        let session_provider_pinned = pinned_provider_id.is_some();
+
+        // Resolve a pin before global selection so the request gets one immutable route snapshot.
+        let mut session_repin_on_success = false;
+        let providers = if let Some(provider_id) = pinned_provider_id {
+            let pinned_provider = state
+                .provider_router
+                .select_pinned_provider(app_type_str, &provider_id)
+                .map_err(|error| {
+                    log::warn!(
+                        "[{tag}] pinned session provider is unreadable: provider_id={provider_id}, error={error}"
+                    );
+                    ProxyError::SessionProviderUnavailable
+                })?
+                .ok_or_else(|| {
+                    log::warn!(
+                        "[{tag}] pinned session provider is missing: provider_id={provider_id}"
+                    );
+                    ProxyError::SessionProviderUnavailable
+                })?;
+            let (provider, repin_on_success) = select_pinned_request_provider(
+                state.provider_router.as_ref(),
+                &app_type,
+                &request_model,
+                pinned_provider,
+            )?;
+            session_repin_on_success = repin_on_success;
+            vec![provider]
+        } else {
+            // Call global selection once; the result is reused by the forwarder.
+            state
+                .provider_router
+                .select_providers(app_type_str)
+                .await
+                .map_err(|e| match e {
+                    crate::error::AppError::AllProvidersCircuitOpen => {
+                        ProxyError::AllProvidersCircuitOpen
+                    }
+                    crate::error::AppError::NoProvidersConfigured => {
+                        ProxyError::NoProvidersConfigured
+                    }
+                    _ => ProxyError::DatabaseError(e.to_string()),
+                })?
+        };
 
         let provider = providers
             .first()
@@ -170,6 +213,8 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            session_provider_pinned,
+            session_repin_on_success,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -199,6 +244,9 @@ impl RequestContext {
     /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
     /// - 故障转移关闭：超时配置不生效（全部传入 0）
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
+        // Read this per request so saving the UI setting takes effect without restarting the proxy.
+        let codex_portable_handoff_on_provider_change =
+            crate::settings::get_settings().codex_portable_handoff_on_provider_change;
         let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
             if self.app_config.auto_failover_enabled {
                 // 故障转移开启：使用配置的值（0 = 禁用超时）
@@ -217,7 +265,9 @@ impl RequestContext {
             };
 
         // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
-        let max_retries = if self.app_config.auto_failover_enabled {
+        let max_retries = if self.session_provider_pinned {
+            0
+        } else if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {
             0
@@ -230,11 +280,15 @@ impl RequestContext {
             state.current_providers.clone(),
             state.gemini_shadow.clone(),
             state.codex_chat_history.clone(),
+            state.codex_route_state.clone(),
             state.failover_manager.clone(),
             state.app_handle.clone(),
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
+            self.session_provider_pinned,
+            self.session_repin_on_success,
+            codex_portable_handoff_on_provider_change,
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),
@@ -280,6 +334,55 @@ impl RequestContext {
     }
 }
 
+fn select_pinned_request_provider(
+    router: &crate::proxy::ProviderRouter,
+    app_type: &AppType,
+    request_model: &str,
+    pinned_provider: Provider,
+) -> Result<(Provider, bool), ProxyError> {
+    if !matches!(app_type, AppType::Codex) || !request_model.starts_with("cc-") {
+        return Ok((pinned_provider, false));
+    }
+
+    let catalog_provider = router
+        .select_codex_catalog_provider(request_model)
+        .map_err(|error| ProxyError::InvalidRequest(error.to_string()))?
+        .ok_or_else(|| {
+            ProxyError::InvalidRequest(format!(
+                "Unknown Codex gateway model alias: {request_model}"
+            ))
+        })?;
+    let repin_on_success = catalog_provider.id != pinned_provider.id;
+    Ok((catalog_provider, repin_on_success))
+}
+
+fn load_codex_session_pin(
+    state: &ProxyState,
+    app_type: &AppType,
+    session_id: &str,
+    session_client_provided: bool,
+) -> Result<Option<String>, ProxyError> {
+    if !matches!(app_type, AppType::Codex) || !session_client_provided {
+        return Ok(None);
+    }
+
+    let route_session_id = session_id.strip_prefix("codex_").unwrap_or(session_id);
+    if uuid::Uuid::parse_str(route_session_id).is_err() {
+        return Ok(None);
+    }
+
+    state
+        .db
+        .get_codex_session_route(route_session_id)
+        .map(|route| route.and_then(|route| route.pinned_provider_id))
+        .map_err(|error| {
+            log::warn!(
+                "[Codex] failed to read session provider route: session={route_session_id}, error={error}"
+            );
+            ProxyError::SessionProviderUnavailable
+        })
+}
+
 /// Pull the Gemini model name out of an API path.
 ///
 /// Accepts forms like `/v1beta/models/gemini-pro:generateContent`,
@@ -300,7 +403,100 @@ pub(crate) fn extract_gemini_model_from_path(endpoint: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_gemini_model_from_path;
+    use super::{extract_gemini_model_from_path, select_pinned_request_provider};
+    use crate::app_config::AppType;
+    use crate::database::Database;
+    use crate::provider::Provider;
+    use crate::proxy::ProviderRouter;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn provider(id: &str, model: Option<&str>) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            model.map_or_else(
+                || json!({}),
+                |model| {
+                    json!({
+                        "ccSwitchMultiProviderGateway": true,
+                        "modelCatalog": {"models": [{"model": model}]}
+                    })
+                },
+            ),
+            None,
+        )
+    }
+
+    #[test]
+    fn pinned_codex_gateway_alias_selects_gateway_for_successful_repin() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let gateway = provider("gateway", Some("cc-12345678/gpt-5.6-sol"));
+        db.save_provider("codex", &gateway).expect("save gateway");
+        let router = ProviderRouter::new(db);
+
+        let (selected, repin_on_success) = select_pinned_request_provider(
+            &router,
+            &AppType::Codex,
+            "cc-12345678/gpt-5.6-sol",
+            provider("direct", None),
+        )
+        .expect("resolve gateway alias");
+
+        assert_eq!(selected.id, "gateway");
+        assert!(repin_on_success);
+    }
+
+    #[test]
+    fn pinned_codex_regular_model_stays_on_original_provider() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = ProviderRouter::new(db);
+
+        let (selected, repin_on_success) = select_pinned_request_provider(
+            &router,
+            &AppType::Codex,
+            "gpt-5.6-sol",
+            provider("direct", None),
+        )
+        .expect("keep direct provider");
+
+        assert_eq!(selected.id, "direct");
+        assert!(!repin_on_success);
+    }
+
+    #[test]
+    fn pinned_codex_unknown_gateway_alias_is_rejected() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = ProviderRouter::new(db);
+
+        let error = select_pinned_request_provider(
+            &router,
+            &AppType::Codex,
+            "cc-missing/gpt-5.6-sol",
+            provider("direct", None),
+        )
+        .expect_err("unknown aliases must fail closed");
+
+        assert!(matches!(error, crate::proxy::ProxyError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn pinned_codex_gateway_alias_with_trailing_space_is_rejected() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let gateway = provider("gateway", Some("cc-12345678/gpt-5.6-sol"));
+        db.save_provider("codex", &gateway).expect("save gateway");
+        let router = ProviderRouter::new(db);
+
+        let error = select_pinned_request_provider(
+            &router,
+            &AppType::Codex,
+            "cc-12345678/gpt-5.6-sol ",
+            provider("direct", None),
+        )
+        .expect_err("gateway aliases must match exactly");
+
+        assert!(matches!(error, crate::proxy::ProxyError::InvalidRequest(_)));
+    }
 
     #[test]
     fn extract_model_with_action() {

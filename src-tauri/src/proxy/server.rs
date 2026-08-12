@@ -13,7 +13,10 @@ use super::{
     handlers,
     log_codes::srv as log_srv,
     provider_router::ProviderRouter,
-    providers::{codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore},
+    providers::{
+        codex_chat_history::CodexChatHistoryStore, codex_route_state::CodexRouteState,
+        gemini_shadow::GeminiShadowStore,
+    },
     types::*,
     ProxyError,
 };
@@ -44,6 +47,8 @@ pub struct ProxyState {
     pub gemini_shadow: Arc<GeminiShadowStore>,
     /// Codex Chat bridge history，用于恢复 previous_response_id 指向的 tool call
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
+    /// Codex session -> last fully successful provider, backed by persistent route rows.
+    pub codex_route_state: Arc<CodexRouteState>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -71,7 +76,7 @@ impl ProxyServer {
         let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
 
         let state = ProxyState {
-            db,
+            db: db.clone(),
             config: Arc::new(RwLock::new(config.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),
@@ -79,6 +84,7 @@ impl ProxyServer {
             provider_router,
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            codex_route_state: Arc::new(CodexRouteState::with_database(db.clone())),
             app_handle,
             failover_manager,
         };

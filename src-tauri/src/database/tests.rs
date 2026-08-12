@@ -184,6 +184,104 @@ fn schema_migration_rejects_future_version() {
 }
 
 #[test]
+fn fresh_schema_creates_canonical_codex_session_routes() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create fresh schema");
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate fresh schema");
+
+    assert!(Database::table_exists(&conn, "codex_session_routes").expect("check route table"));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read schema version"),
+        13
+    );
+    conn.execute(
+        "INSERT INTO codex_session_routes
+         (session_id, pinned_provider_id, last_successful_provider_id, created_at, updated_at)
+         VALUES ('550e8400-e29b-41d4-a716-446655440000', NULL, NULL, 1, 1)",
+        [],
+    )
+    .expect("canonical UUID should satisfy schema check");
+    assert!(conn
+        .execute(
+            "INSERT INTO codex_session_routes
+             (session_id, pinned_provider_id, last_successful_provider_id, created_at, updated_at)
+             VALUES ('codex_550e8400-e29b-41d4-a716-446655440001', NULL, NULL, 1, 1)",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO codex_session_routes
+             (session_id, pinned_provider_id, last_successful_provider_id, created_at, updated_at)
+             VALUES (NULL, NULL, NULL, 1, 1)",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO codex_session_routes
+             (session_id, pinned_provider_id, last_successful_provider_id, created_at, updated_at)
+             VALUES ('550e8400-e29b-41d4-a716-44665544-000', NULL, NULL, 1, 1)",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn migration_v12_to_v13_adds_codex_session_routes() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            PRIMARY KEY (id, app_type)
+        );",
+    )
+    .expect("seed v12 schema");
+    Database::set_user_version(&conn, 12).expect("set user_version=12");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply v13 migration");
+
+    assert!(Database::table_exists(&conn, "codex_session_routes").expect("check route table"));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read version after migration"),
+        13
+    );
+}
+
+#[test]
+fn sql_backup_roundtrip_preserves_codex_session_routes() -> Result<(), AppError> {
+    const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    let source = Database::memory()?;
+    {
+        let conn = lock_conn!(source.conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES ('provider-a', 'codex', 'Provider A', '{}', '{}')",
+            [],
+        )?;
+    }
+    source.set_codex_session_pin(SESSION_ID, "provider-b")?;
+    source.set_codex_session_last_successful_provider(SESSION_ID, "provider-a")?;
+    let sql = source.export_sql_string()?;
+
+    let restored = Database::memory()?;
+    restored.import_sql_string(&sql)?;
+
+    let route = restored
+        .get_codex_session_route(SESSION_ID)?
+        .expect("restored route should exist");
+    assert_eq!(route.pinned_provider_id.as_deref(), Some("provider-b"));
+    assert_eq!(
+        route.last_successful_provider_id.as_deref(),
+        Some("provider-a")
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

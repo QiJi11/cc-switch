@@ -4,6 +4,7 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
+mod codex_browser_trust;
 mod codex_config;
 mod codex_history_migration;
 mod codex_state_db;
@@ -1413,6 +1414,7 @@ pub fn run() {
             commands::get_session_messages,
             commands::delete_session,
             commands::delete_sessions,
+            commands::set_codex_session_provider,
             commands::launch_session_terminal,
             commands::get_tool_versions,
             commands::run_tool_lifecycle_action,

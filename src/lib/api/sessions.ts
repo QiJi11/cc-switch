@@ -39,6 +39,16 @@ export const sessionsApi = {
     return await invoke("delete_sessions", { items });
   },
 
+  async setCodexProvider(
+    sessionId: string,
+    providerId: string | null,
+  ): Promise<boolean> {
+    return await invoke("set_codex_session_provider", {
+      sessionId,
+      providerId,
+    });
+  },
+
   async launchTerminal(options: {
     command: string;
     cwd?: string | null;

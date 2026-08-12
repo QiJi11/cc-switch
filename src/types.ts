@@ -365,6 +365,8 @@ export interface Settings {
   enableFailoverToggle?: boolean;
   // Preserve Codex ChatGPT login in auth.json when switching third-party providers
   preserveCodexOfficialAuthOnSwitch?: boolean;
+  // Preserve portable visible context when a Codex session changes providers
+  codexPortableHandoffOnProviderChange?: boolean;
   // Run official Codex under the shared "custom" provider id so future
   // sessions share one resume-history bucket with third-party providers
   unifyCodexSessionHistory?: boolean;
@@ -455,6 +457,8 @@ export interface SessionMeta {
   lastActiveAt?: number;
   sourcePath?: string;
   resumeCommand?: string;
+  pinnedProviderId?: string | null;
+  lastSuccessfulProviderId?: string | null;
 }
 
 export interface SessionMessage {

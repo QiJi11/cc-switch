@@ -1,0 +1,730 @@
+# Ralph Progress Log
+Started: 2026-07-17T02:40:00+08:00
+---
+
+## 2026-07-17 - Execution brief for US-007
+- Project: cc-switch-fork-work
+- User goal: allow multiple Codex App conversations to run concurrently on independently selected providers, with manual repinning and portable history handoff.
+- Assumptions:
+  - The selector lives only in the existing Session Manager detail header; route settings gain no new surface.
+  - A pinned session never automatically consumes another provider after 429, timeout, or upstream failure.
+  - Unpinned sessions preserve the existing global routing and optional failover behavior.
+  - Pin changes affect the next request; an in-flight request keeps its route snapshot.
+  - Codex App keeps one conversation HOME and CLI run-scoped HOMEs stay isolated.
+  - No paid provider request or replacement of the running CC Switch installation is authorized.
+- Story list:
+  - `US-007-ST-001`: schema v13 and persistent Codex session-route DAO.
+  - `US-007-ST-002`: pinned proxy routing, persistent last-success ownership, and fail-closed errors.
+  - `US-007-ST-003`: Tauri commands, SessionMeta fields, API types, and deletion cleanup.
+  - `US-007-ST-004`: Session Manager provider selector, badges, query mutation, and i18n.
+  - `US-007-ST-005`: three-session local fixture, full checks, documentation, release, NSIS, and hashes.
+- Acceptance checks: three concurrent sessions use three providers without global mutation; manual repin safely hands off history; pinned failures do not fall back; restart persistence, UI behavior, full tests, and release artifacts pass.
+- Max iterations: 10.
+- Mode: dirty continuation on `qiji/local-codex-post-switch-runner`; no branch switch and no parallel writers.
+---
+
+## 2026-07-17 - Execution brief for US-006
+- Project: cc-switch-fork-work
+- User goal: wire `codexPortableHandoffOnProviderChange` into the request path and regenerate verified Windows release artifacts.
+- Assumptions:
+  - Disabling the setting still enforces provider-boundary sanitization and only skips local rollout transcript reconstruction.
+  - Codex App keeps one conversation home; CLI run-scoped homes remain isolated.
+  - No paid provider verification, installation, or replacement of the running CC Switch is authorized.
+- Story list:
+  - `US-006-ST-001`: runtime setting wiring and behavior regression tests.
+  - `US-006-ST-002`: deployment documentation, full checks, Vite/Rust/NSIS rebuild, and SHA-256 recording.
+- Acceptance checks: focused enabled/disabled handoff tests, full Rust and TypeScript checks, formatting/diff checks, production Vite + Rust release + NSIS, artifact hashes.
+- Max iterations: 4
+- Mode: dirty continuation on `qiji/local-codex-post-switch-runner`; no branch switch and no parallel writers.
+---
+
+## Execution Brief
+- Project: cc-switch-fork-work
+- Goal: preserve one Codex App thread while CC Switch hot-switches among approved providers, automatically reproducing the visible-context effect of a manual full-copy handoff.
+- Assumptions: Codex App uses one shared conversation home; provider credentials remain managed by CC Switch; approved providers are 630 Codex Pool 2, 800 Codex Pool 1, and BLA Codex 3; no paid probes are authorized.
+- Stories: request sanitization; session-aware routing; compacted transcript fallback; user setting; regression and deployment readiness.
+- Acceptance: same session across providers, safe 429 failover, no repeated tool execution, no credential/transcript logging, relevant tests and build pass.
+- Max iterations: 10.
+- Baseline: clean worktree on qiji/local-codex-post-switch-runner before Ralph initialization; scripts/ralph was then initialized for this run.
+
+## Codebase Patterns
+- CC Switch already has Codex proxy takeover, provider hot-switch UI synchronization, failover routing, session-id extraction, and local history migration; extend those paths instead of introducing a second proxy service.
+- Codex provider changes may invalidate reasoning.encrypted_content. Portable handoff must preserve user-visible conversation data while treating provider-bound encrypted reasoning as non-portable.
+- Responses API item `id` values are provider-scoped, while `call_id` and attachment `file_id` values carry portable tool/output and file linkage; sanitization must not conflate them.
+- Keep request sanitizers scoped to the Responses `input` history so similarly named keys in request metadata or tool schemas are not accidentally rewritten.
+- Keep Codex route ownership in `ProxyState` and represent each request as an uncommitted attempt; only a fully successful completion may commit its provider, while dropping headers-only or partial-stream attempts leaves ownership unchanged.
+- Derive every failover candidate body from the original Responses request, then sanitize against the last fully successful provider; carry the route attempt with the response lifecycle and commit only on a complete body or `response.completed` SSE event.
+- Never modify Codex session JSONL, state databases, history indexes, attachments, or provider secrets while reconstructing a transcript.
+- Locate a Codex rollout by an exact UUID filename suffix, then verify the same UUID in `session_meta`; canonicalize the Codex home, session root, and file before any read, and never follow session-tree symlinks.
+- Treat rollout `compacted`, reasoning, event, context, and world-state records as internal; portable visible transcripts come only from user/assistant `response_item` messages, attachment references, and completed tool outputs.
+- Compare the rollout's trailing user message with the current Responses input after applying the same visible-content normalization; only remove an exact match, because the rollout write may lag the proxy request.
+- Detect portable transcript requests before provider-specific format conversion, and suppress full request-body debug logging for the rest of that attempt; transformed Chat payloads may no longer retain the Responses marker shape.
+- Codex HTTP session extraction namespaces client UUIDs as `codex_<uuid>`; strip only that internal prefix before strict UUID validation and exact rollout lookup.
+- For backward-compatible default-on settings, pair Rust `#[serde(default = "default_true")]` with the same `true` default in `AppSettings::default` and every frontend form initialization/reset baseline; preserve explicit `false` with nullish fallback rather than truthiness checks.
+- The standalone Vite renderer cannot populate settings without Tauri `invoke`; browser-check settings components with a temporary harness that mounts the real component, i18n resources, and project styles, then remove the harness before committing.
+- Store Codex conversation routes under canonical raw UUIDs (lowercase, hyphenated, without the internal `codex_` prefix). Provider cleanup clears only matching pins and preserves last-success ownership; successful session deletion removes the whole route row.
+---
+
+## 2026-07-17 03:06 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-030634-RunProject-49184
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T03:06:37.5033159+08:00
+---
+
+## 2026-07-17 03:06 +08:00 - Execution analysis for Run ID: 20260717-030634-RunProject-49184
+- Subtasks analyzed: 9
+- Parallel batches: 0
+- Batch 1 (serial): US-001/US-001-ST-001
+- Batch 2 (serial): US-002/US-002-ST-001
+- Batch 3 (serial): US-002/US-002-ST-002
+- Batch 4 (serial): US-003/US-003-ST-001
+- Batch 5 (serial): US-003/US-003-ST-002
+- Batch 6 (serial): US-004/US-004-ST-001
+- Batch 7 (serial): US-004/US-004-ST-002
+- Batch 8 (serial): US-005/US-005-ST-001
+- Batch 9 (serial): US-005/US-005-ST-002
+---
+
+## 2026-07-17 03:06 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-030634-RunProject-49184
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+  ?? scripts/ralph/
+---
+
+## 2026-07-17 03:34 +08:00 - US-001-ST-001
+- Story: US-001 - Provider-boundary request sanitization
+- What was implemented
+  - Added a pure `Cow<Value>` Codex handoff sanitizer that returns the original request unchanged when no provider boundary exists.
+  - On a provider change, removes `previous_response_id`, response item `id` values, nested `encrypted_content`, encrypted-only reasoning/compaction items, and unresolved `item_reference` items.
+  - Preserves readable reasoning/compaction summaries, visible user/assistant messages, attachment references, completed tool calls, and tool outputs.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_portable_handoff`: passed, 5 passed, 0 failed, 1752 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_portable_handoff.rs src-tauri/src/proxy/providers/mod.rs`: passed.
+  - `git diff --check`: passed.
+- Browser verification result: not applicable; this is a pure Rust proxy transformer with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - OpenAI Codex protocol models assign response item IDs separately from portable `call_id` and `file_id` references.
+  - Official compaction response items currently carry opaque encrypted content; a future readable summary can be retained without forwarding the encrypted payload.
+  - The Tauri lib-test target has a long cold compile on Windows; subsequent focused runs reuse the cache and complete quickly.
+---
+
+## 2026-07-17 03:48 +08:00 - US-002-ST-001
+- Story: US-002 - Session-aware provider handoff
+- What was implemented
+  - Added a bounded, process-local LRU cache from Codex session id to the last fully successful provider id.
+  - Added an explicit route-attempt API: lookups are read-only and ownership changes only through `complete_successfully`; dropping an attempt after headers, a partial SSE stream, failure, or cancellation leaves the previous provider unchanged.
+  - Attached the route state to `ProxyState`, so concurrent requests share one synchronized cache and a proxy restart naturally creates an empty cache.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_route_state.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `src-tauri/src/proxy/server.rs`
+  - `src-tauri/src/proxy/response_processor.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_route_state.rs src-tauri/src/proxy/providers/mod.rs src-tauri/src/proxy/server.rs src-tauri/src/proxy/response_processor.rs`: passed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_route_state`: passed, 7 passed, 0 failed, 1757 filtered out. The first invocation exceeded its 120-second wrapper timeout during compilation; its recorded child process completed, and the cached rerun produced the passing result in 18.2 seconds.
+  - `git diff --check`: passed.
+  - Compiler emitted one expected staged `dead_code` warning for `ProxyState.codex_route_state`; `US-002-ST-002` is the dependent request/response wiring subtask that will consume it.
+- Browser verification result: not applicable; this is in-memory Rust proxy state with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - The cache uses the repository's existing `HashMap + VecDeque + lock` bounded-state pattern, avoiding a new dependency for a small fixed-size store.
+  - A consuming completion token makes partial SSE and cancellation behavior explicit: ownership is unchanged unless the token is committed.
+  - GitHub's anonymous API was rate-limited during reuse research; Rust standard-library docs and crates.io metadata were available, and no external cache dependency was adopted.
+---
+
+## 2026-07-17 04:07 +08:00 - US-002-ST-002
+- Story: US-002 - Session-aware provider handoff
+- What was implemented
+  - Wired the Codex provider-boundary sanitizer into each `/responses` and `/responses/compact` provider candidate, so manual switches and failover retries independently derive a safe body from the original request.
+  - Carried the successful candidate's route attempt through direct Responses and Chat-to-Responses handling; non-streaming responses commit after the complete body is rebuilt, while streams commit only on `response.completed`.
+  - Kept headers-only, partial SSE, tool-instruction exposure, stream failures, and cancellations uncommitted, so no later request treats an incomplete provider as the session owner.
+  - Preserved the existing successful-candidate path that synchronizes the actual provider with CC Switch status, UI, and tray failover behavior.
+- Files changed
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `src-tauri/src/proxy/response_processor.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 942 passed, 0 failed, 826 filtered out.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - Focused regression coverage verifies manual/failover candidate sanitization, Responses-only scoping, partial tool-call SSE non-commit, and `response.completed` commit.
+- Browser verification result: not applicable; this is Rust proxy forwarding and response lifecycle behavior with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - OpenAI Responses streams expose typed semantic events; `response.completed` is the terminal success signal suitable for route ownership, while earlier output and function-call events are already client-visible and must not enable cross-provider replay.
+  - Connection accounting and route ownership share the same response lifetime; keeping both in one lifecycle value prevents transformed and pass-through paths from committing at different stages.
+---
+
+## 2026-07-17 04:34 +08:00 - US-003-ST-001
+- Story: US-003 - Portable visible transcript fallback
+- What was implemented
+  - Added a read-only Codex rollout reader that resolves the active Codex home through the existing settings-aware helper and locates one rollout by an exact session UUID.
+  - Added canonical root/file validation, symlink rejection, bounded directory depth, a 16 MiB read limit, strict JSONL parsing, session metadata verification, and typed errors for invalid, missing, ambiguous, oversized, malformed, and path-escaping inputs.
+  - Extracted ordered user/assistant text, sanitized attachment references, and completed function/custom tool results while excluding system/developer messages, synthetic context injections, compaction summaries, reasoning, encrypted content, incomplete tool results, and common raw credentials.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `src-tauri/src/proxy/providers/mod.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib codex_rollout_transcript`: passed, 9 passed, 0 failed, 1768 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/providers/codex_rollout_transcript.rs src-tauri/src/proxy/providers/mod.rs`: passed.
+  - `git diff --cached --check`: passed.
+  - Clean-code guard split the scanner/parser responsibilities and replaced output parameters with typed return values; test guard split independent boundary scenarios. The added Bearer-token counterexample initially failed, exposed redaction ordering, and passed after Bearer/JWT replacement was moved before generic assignment redaction.
+  - One expected staged `dead_code` warning remains for `read_visible_transcript`; the dependent `US-003-ST-002` subtask will wire this entry point into forwarding.
+- Browser verification result: not applicable; this is a read-only Rust rollout parser with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Official Codex rollout records are tagged JSONL items; compaction checkpoints and their summaries are model-context state, not a user-visible transcript source.
+  - Credential redaction must consume complete Bearer/JWT-like tokens before generic `key=value` replacement, or the scheme name can be removed while the credential remains.
+  - Canonical path checks must be applied both during candidate discovery and again immediately before opening the file.
+---
+
+## 2026-07-17 05:07 +08:00 - US-003-ST-002
+- Story: US-003 - Portable visible transcript fallback
+- What was implemented
+  - Added a compacted-handoff fallback that reads the local visible rollout only when provider-state sanitization would otherwise leave no readable history.
+  - Injected the transcript as one bounded, clearly delimited text message; historical tool results remain inert JSON text and cannot replay as executable tool calls.
+  - Normalized and compared the current user content, including redacted text and attachment references, so only an exact trailing duplicate is removed; rollout-write lag preserves unmatched history.
+  - Added a typed `portable_handoff_unavailable` failure that returns HTTP 503 without sending an unsafe provider request or charging the provider's circuit-breaker health.
+  - Suppressed complete request-body debug logging whenever portable context is present, with detection performed before provider-specific Responses-to-Chat conversion.
+- Files changed
+  - `src-tauri/src/proxy/providers/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/error.rs`
+  - `src-tauri/src/proxy/error_mapper.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib portable_handoff`: passed, 10 passed, 0 failed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib compacted_`: passed, 3 passed, 0 failed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 958 passed, 0 failed, 826 filtered out.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - One initial focused test wrapper timed out during the cold Rust compile; the child compile completed, and all cached reruns above passed.
+  - Clean-code guard found and fixed rollout-lag deduplication and pre-transform body-log suppression; test guard removed a wording-only assertion and retained behavior-focused boundary cases.
+- Browser verification result: not applicable; this is Rust proxy request transformation and local rollout handling with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Current-input deduplication must compare normalized structured content rather than assuming the rollout's final user entry is current.
+  - Log suppression must be decided on the original Responses body because provider adapters may transform the marker into a different wire format before logging.
+  - Local transcript/build failures are client-visible safety failures, not provider health failures; release any half-open permit neutrally and stop before forwarding.
+---
+
+## 2026-07-17 05:17 +08:00 - US-004-ST-001
+- Story: US-004 - User control and safe defaults
+- What was implemented
+  - Added `codexPortableHandoffOnProviderChange` to the Rust settings model, TypeScript settings interface, and Zod settings schema.
+  - Defaulted missing legacy values to enabled during Rust deserialization and frontend form normalization without adding any write to the read path.
+  - Preserved an explicit `false` value through serialization, initialization, empty-state updates, and form reset merges.
+- Files changed
+  - `src-tauri/src/settings.rs`
+  - `src/types.ts`
+  - `src/lib/schemas/settings.ts`
+  - `src/hooks/useSettingsForm.ts`
+  - `tests/hooks/useSettingsForm.test.tsx`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib settings::tests`: passed, 13 passed, 0 failed, including serialization and existing settings merge tests.
+  - `node .\\node_modules\\vitest\\vitest.mjs run tests/hooks/useSettingsForm.test.tsx`: passed, 7 passed, 0 failed.
+  - `node .\\node_modules\\typescript\\bin\\tsc --noEmit`: passed.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+  - Direct Prettier check for the four changed TypeScript files and the hook test: passed.
+  - `git diff --check`: passed.
+  - Full Vitest run was not green: unrelated `tests/integration/App.test.tsx` cases failed on existing Tauri/MSW test isolation (timeouts, missing `list_profiles` handler, and leaked provider state); the file still failed when run alone, while the focused settings form suite passed.
+  - `clean-code-guard`: clean. `test-guard`: no violations; assertions extend existing merge scenarios without duplicate test bodies.
+- Browser verification result: not applicable; this subtask changes settings persistence and form normalization but does not expose UI controls.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Default-on compatibility must be mirrored in Rust deserialization/default construction and all frontend form baselines, while `?? true` preserves an intentional `false`.
+  - The Codex `pnpm` wrapper may attempt dependency reconciliation before project scripts; direct installed binaries provide non-mutating checks when build-script approval is intentionally withheld.
+  - The current full frontend suite has unrelated isolation failures in `tests/integration/App.test.tsx`; use the focused settings suite for this subtask and retain the full-suite failure as a known baseline signal.
+---
+
+## 2026-07-17 05:27 +08:00 - US-004-ST-002
+- Story: US-004 - User control and safe defaults
+- What was implemented
+  - Added a default-on portable handoff toggle to the existing Codex App Enhancements section; no provider switching panel or second settings surface was introduced.
+  - Added Chinese and English copy explaining that visible messages, attachment references, and completed tool results are preserved while provider-specific encrypted reasoning is discarded and not sent to the new provider.
+- Files changed
+  - `src/components/settings/CodexAuthSettings.tsx`
+  - `src/i18n/locales/zh.json`
+  - `src/i18n/locales/en.json`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Direct Prettier check for the three changed frontend files: passed.
+  - `node .\node_modules\vite\bin\vite.js build`: passed, 3292 modules transformed; only existing dependency-data, dynamic-import, and chunk-size warnings were emitted.
+  - Both locale JSON files parsed successfully with `ConvertFrom-Json`.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean.
+- Browser verification result:
+  - Chrome rendered the real `CodexAuthSettings` component with project styles and i18n through a temporary Vite harness that was removed after verification.
+  - Chinese and English titles/descriptions were visible, the new switch rendered checked by default, and a click changed it from `checked` to `unchecked`.
+  - Desktop and 390 x 844 mobile views showed no overlap; DOM checks confirmed no horizontal overflow.
+  - The standalone full Settings page could not load settings without the Tauri runtime (`window.__TAURI_INTERNALS__.invoke` was unavailable), so browser verification was scoped to the real component while source inspection confirmed it remains mounted in the existing Settings page.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Keep portable handoff beside the existing Codex authentication/history enhancements so it is discoverable without duplicating provider-switching controls.
+  - A default-on persisted setting must use `?? true` at the control boundary so an explicit `false` remains visible after reload.
+---
+
+## 2026-07-17 05:45 +08:00 - US-005-ST-001
+- Story: US-005 - Regression and deployment readiness
+- What was implemented
+  - Added an end-to-end Rust proxy fixture that starts the real local proxy and a loopback-only three-provider fake upstream.
+  - Exercised A-to-B manual handoff, A HTTP 429 to B failover, and B-to-C manual handoff under one Codex session id.
+  - Verified candidate-specific request sanitization, one client-visible copy of each assistant output, one executable tool call, transcript redaction, and absence of encrypted secrets and transcript bodies from captured debug logs.
+  - Fixed the HTTP integration mismatch where the internal `codex_` session namespace prevented strict UUID rollout lookup.
+- Files changed
+  - `src-tauri/src/proxy/tests/codex_portable_handoff.rs`
+  - `src-tauri/src/proxy/tests/mod.rs`
+  - `src-tauri/src/proxy/mod.rs`
+  - `src-tauri/src/proxy/providers/codex_rollout_transcript.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib three_provider_handoff_stays_local`: passed, 1 passed, 0 failed, 1786 filtered out.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::`: passed, 959 passed, 0 failed, 828 filtered out.
+  - `rustfmt --edition 2021 --check src-tauri/src/proxy/mod.rs src-tauri/src/proxy/providers/codex_rollout_transcript.rs src-tauri/src/proxy/tests/mod.rs src-tauri/src/proxy/tests/codex_portable_handoff.rs`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean after limiting the production fix to session-prefix normalization.
+  - `test-guard`: removed internal-helper and exact log-wording assertions; the final fixture tests observable HTTP, response, and log-safety behavior with real local infrastructure.
+- Browser verification result: not applicable; this is a Rust proxy integration fixture with no UI changes.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Full HTTP coverage is required for portable handoff because direct forwarder tests bypass the `codex_` session namespace added by request extraction.
+  - A single loopback Axum upstream can model multiple providers by path while proving that no paid or external model endpoint is contacted.
+  - Failover candidates must derive independently from the original body: the failed A candidate is sanitized, while the successful prior-owner B candidate retains its valid `previous_response_id`.
+---
+
+## 2026-07-17 06:33 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-063306-RunProject-58176
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T06:33:07.0268825+08:00
+---
+
+## 2026-07-17 06:33 +08:00 - Execution analysis for Run ID: 20260717-063306-RunProject-58176
+- Subtasks analyzed: 1
+- Parallel batches: 0
+- Batch 1 (serial): US-005/US-005-ST-002
+---
+
+## 2026-07-17 06:33 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-063306-RunProject-58176
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M pnpm-workspace.yaml
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+  ?? scripts/ralph/tauri-build-check.conf.json
+---
+
+## 2026-07-17 06:43 +08:00 - US-005-ST-002
+- Story: US-005 - Regression and deployment readiness
+- What was implemented
+  - Added deployment, validation, and rollback instructions for keeping Codex App on one conversation home while CC Switch routes the same thread across providers.
+  - Recorded the verified full-check evidence and separated the successful release/NSIS outputs from the unavailable MSI bundle, whose WiX download timed out.
+  - Removed the temporary Tauri build override and reverted the `pnpm-workspace.yaml` build-approval prompt residue without approving scripts or reinstalling dependencies.
+- Files changed
+  - `docs/codex-portable-provider-handoff.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Full Rust test evidence from the interrupted Ralph iteration: library tests passed, `1785 passed / 2 ignored / 0 failed`; all subsequent integration targets passed, including proxy, failover, settings, provider service, and Codex history migration coverage.
+  - Local three-provider proxy regression from US-005-ST-001: passed, `959 passed / 0 failed`; no paid or external model endpoint was contacted.
+  - Production build evidence: Vite and Rust release build passed; `src-tauri\target\release\cc-switch.exe` and the NSIS installer were generated. The default all-bundle command reached MSI packaging but failed only while downloading WiX (`timeout: global`), so MSI is not reported as verified.
+  - Documentation guard verified every setting name, error code, path rule, backup behavior, and test count against source or captured build/test output.
+  - `git diff --check`: passed.
+- Browser verification result: not applicable; this subtask adds operational documentation and validates existing build artifacts.
+- Final deliverables:
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\docs\codex-portable-provider-handoff.md
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\bundle\nsis\CC Switch_3.16.5_x64-setup.exe
+- **Learnings for future iterations:**
+  - A Tauri release executable can build successfully while the default all-bundle command later fails on an external MSI/WiX download; report the verified bundle type and the unavailable bundle separately.
+  - Keep App conversation storage independent from provider credentials: one Codex App home plus proxy takeover supports hot switching, while CLI run-scoped homes remain untouched.
+  - Ralph completion state may remain false when the child model hits a provider error after tests and artifacts finish; recover from primary logs and artifact hashes instead of repeating expensive builds.
+---
+
+## 2026-07-17 06:59 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-065934-RunProject-36632
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T06:59:35.4035566+08:00
+---
+
+## 2026-07-17 06:59 +08:00 - Execution analysis for Run ID: 20260717-065934-RunProject-36632
+- Subtasks analyzed: 2
+- Parallel batches: 0
+- Batch 1 (serial): US-006/US-006-ST-001
+- Batch 2 (serial): US-006/US-006-ST-002
+---
+
+## 2026-07-17 06:59 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-065934-RunProject-36632
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 07:12 +08:00 - US-006-ST-001
+- Story: US-006 - Wire the handoff toggle and refresh release artifacts
+- What was implemented
+  - Read `codexPortableHandoffOnProviderChange` whenever a request creates a new `RequestForwarder`, so a saved UI change applies to the next request without restarting the proxy.
+  - Kept provider-boundary sanitization unconditional, while making disabled mode return the sanitized request before any local rollout read or portable transcript injection.
+  - Added a regression proving disabled mode does not call the transcript reader or add the portable marker, but still removes `previous_response_id`, response item ids, encrypted reasoning, and compaction state.
+- Files changed
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Focused disabled-mode test: passed, 1 passed / 0 failed.
+  - Enabled compacted-handoff test: passed, 1 passed / 0 failed.
+  - Independent provider-candidate sanitization test: passed, 1 passed / 0 failed.
+  - Full proxy regression: passed, 960 passed / 0 failed.
+  - `rustfmt --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: clean; the change remains at the existing request-construction and handoff boundaries with no new abstraction or dependency.
+  - `test-guard`: clean; the test asserts observable sanitized output and uses the injected rollout reader only as the filesystem-boundary probe.
+- Browser verification result: not applicable; this is proxy runtime behavior with no UI change.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - The setting controls only local visible-transcript reconstruction; provider-specific state removal is a non-optional safety boundary.
+  - Snapshot settings when constructing each request forwarder so persisted UI changes apply on the next request while a single request remains internally consistent.
+---
+
+## 2026-07-17 07:52 +08:00 - US-006-ST-002
+- Story: US-006 - Wire the handoff toggle and refresh release artifacts
+- What was implemented
+  - Clarified that disabling portable handoff skips rollout reconstruction but keeps provider-state sanitization.
+  - Rebuilt and deployed the final custom-protocol Windows executable containing the runtime setting fix.
+  - Configured Codex takeover and automatic failover with priority `630刀 codex拼车2` → `800刀 codex拼车1` → `BLA codex3 0.165 pro`.
+- Files changed
+  - `docs/codex-portable-provider-handoff.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - `cargo test --manifest-path .\src-tauri\Cargo.toml --lib proxy::`: passed, 960 passed / 0 failed.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - Final EXE: SHA-256 `19CD90583CEBED6A1F70A2B392E5B039663559487FEAF5A35DB4CAE88ADAD138`.
+  - Final NSIS installer: SHA-256 `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`.
+  - `clean-code-guard`: clean.
+  - `test-guard`: clean.
+  - No paid provider request was sent.
+- Browser verification result: the CC Switch WebView showed the portable handoff toggle enabled; local routing and Codex takeover enabled; the configured failover order persisted after a normal restart.
+- Final deliverables:
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\docs\codex-portable-provider-handoff.md
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\cc-switch.exe
+  C:\Users\tianh\Documents\Codex-Contexts\cc-switch-fork-work\src-tauri\target\release\bundle\nsis\CC Switch_3.16.5_x64-setup.exe
+- **Learnings for future iterations:**
+  - Tauri custom-protocol production builds may relink after a direct Cargo release; deploy only the final custom-protocol artifact.
+  - Failover queue priority follows provider `sort_index`, not insertion order.
+  - Verify the persisted current provider after an application restart instead of inferring it from the enabled failover toggle.
+---
+
+## 2026-07-17 09:24 +08:00 - US-006-ST-002 follow-up verification
+- Repaired one test fixture to request an OS-assigned ephemeral proxy port instead of colliding with the running installed CC Switch on port 15721.
+- Focused port-isolation regression: passed, 1 passed / 0 failed.
+- Full Rust verification: passed; library summary `1786 passed / 0 failed / 2 ignored`, and every integration-test target passed.
+- Final artifact hashes were re-read and remain unchanged:
+  - EXE: `19CD90583CEBED6A1F70A2B392E5B039663559487FEAF5A35DB4CAE88ADAD138`.
+  - NSIS: `C769A631EFC6DDC85A1702B8FFF13AF04C5754FC5667779FBAC48CEDFCD6246B`.
+- Read-only installation audit found `C:\Programs\CC Switch\cc-switch.exe` already matches the final EXE hash. The original deferred-install assumption therefore no longer holds; no rollback or further replacement was performed during this follow-up.
+- NSIS-only bundling succeeded with updater artifact generation disabled. MSI/WiX, updater signing, and Tauri bundle-type patching remain unverified.
+---
+
+## 2026-07-17 17:05 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-170513-RunProject-26972
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T17:05:13.6109165+08:00
+---
+
+## 2026-07-17 17:05 +08:00 - Execution analysis for Run ID: 20260717-170513-RunProject-26972
+- Subtasks analyzed: 5
+- Parallel batches: 0
+- Batch 1 (serial): US-007/US-007-ST-001
+- Batch 2 (serial): US-007/US-007-ST-002
+- Batch 3 (serial): US-007/US-007-ST-003
+- Batch 4 (serial): US-007/US-007-ST-004
+- Batch 5 (serial): US-007/US-007-ST-005
+---
+
+## 2026-07-17 17:05 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-170513-RunProject-26972
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+   ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 17:15 +08:00 - US-007-ST-001
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Raised the database schema to v13 and added `codex_session_routes` with canonical raw UUID primary keys, nullable pin and last-success provider fields, timestamps, and a pin lookup index.
+  - Added DAO operations to read routes, independently upsert or clear pins, record the last successful provider, clear pins for a deleted provider, and delete a session route.
+  - Kept provider ids free of foreign keys so provider-pin cleanup preserves the last-success marker needed for a safe next handoff.
+  - Added fresh-schema, v12-to-v13, SQL backup restore, CRUD, canonicalization, malformed-id, provider cleanup, and session cleanup coverage.
+- Files changed
+  - `src-tauri/src/database/mod.rs`
+  - `src-tauri/src/database/schema.rs`
+  - `src-tauri/src/database/dao/codex_session_routes.rs`
+  - `src-tauri/src/database/dao/mod.rs`
+  - `src-tauri/src/database/tests.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Focused Codex session-route tests: passed, 6 passed / 0 failed.
+  - Database module regression: passed, 42 passed / 0 failed.
+  - Full Rust library suite: passed, 1792 passed / 0 failed / 2 ignored.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: split pin set/clear into explicit commands and hardened the schema against NULL or non-canonical direct SQL keys; final guard pass clean.
+  - `test-guard`: clean; tests use real SQLite schemas and backup import paths with distinct behavioral scenarios and no mocks.
+- Browser verification result: not applicable; this subtask changes only Rust database schema and persistence behavior.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - SQLite non-integer primary keys need an explicit `NOT NULL` when the schema must reject NULL keys.
+  - Validate and canonicalize UUIDs at the DAO boundary, while retaining a schema CHECK so direct SQL and restored backups cannot introduce prefixed or malformed session ids.
+  - Keep pin updates and completed-provider ownership updates independent so clearing or repinning a conversation cannot erase handoff history.
+---
+
+## 2026-07-17 22:48 +08:00 - Ralph session
+- Project: cc-switch-fork-work
+- Mode: RunProject
+- Run ID: 20260717-224815-RunProject-33540
+- Branch: qiji/local-codex-post-switch-runner
+- Started: 2026-07-17T22:48:16.3293164+08:00
+---
+
+## 2026-07-17 22:48 +08:00 - Execution analysis for Run ID: 20260717-224815-RunProject-33540
+- Subtasks analyzed: 4
+- Parallel batches: 0
+- Batch 1 (serial): US-007/US-007-ST-002
+- Batch 2 (serial): US-007/US-007-ST-003
+- Batch 3 (serial): US-007/US-007-ST-004
+- Batch 4 (serial): US-007/US-007-ST-005
+---
+
+## 2026-07-17 22:48 +08:00 - Dirty baseline continuation
+- Project: cc-switch-fork-work
+- Run ID: 20260717-224815-RunProject-33540
+- Branch: qiji/local-codex-post-switch-runner
+- Mode: RunProject allowed dirty continuation; no auto-commit, no branch switch, no RunParallel.
+- Git status:
+   M scripts/ralph/prd.json
+   M scripts/ralph/progress.txt
+   M src-tauri/src/proxy/error.rs
+   M src-tauri/src/proxy/error_mapper.rs
+   M src-tauri/src/proxy/forwarder.rs
+   M src-tauri/src/proxy/handler_context.rs
+   M src-tauri/src/proxy/handlers.rs
+   M src-tauri/src/proxy/provider_router.rs
+   M src-tauri/src/proxy/providers/codex_route_state.rs
+   M src-tauri/src/proxy/server.rs
+  ?? scripts/ralph/.last-branch
+  ?? scripts/ralph/CODEX.md
+  ?? scripts/ralph/prd.json.example
+  ?? scripts/ralph/ralph.ps1
+---
+
+## 2026-07-17 23:14 +08:00 - US-007-ST-002
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Resolved a Codex session pin before global provider selection and snapshotted exactly one pinned provider for the request.
+  - Made pinned requests bypass circuit state, global failover candidates, global current-provider updates, tray switching, and failover counters.
+  - Added stable HTTP 503 `session_provider_unavailable` handling for unreadable route rows and missing or unreadable pinned providers.
+  - Persisted the last fully successful provider and used it after proxy restart for provider-boundary sanitization; the first explicit pin with unknown ownership is handled as a boundary.
+  - Added local fake-upstream coverage proving pinned 429, 500, and timeout failures never reach the global fallback.
+- Files changed
+  - `src-tauri/src/proxy/error.rs`
+  - `src-tauri/src/proxy/error_mapper.rs`
+  - `src-tauri/src/proxy/forwarder.rs`
+  - `src-tauri/src/proxy/handler_context.rs`
+  - `src-tauri/src/proxy/handlers.rs`
+  - `src-tauri/src/proxy/provider_router.rs`
+  - `src-tauri/src/proxy/providers/codex_route_state.rs`
+  - `src-tauri/src/proxy/server.rs`
+  - `src-tauri/src/proxy/tests/codex_portable_handoff.rs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Pinned routing unit tests: passed, 2 passed / 0 failed.
+  - Pinned retryable-failure local proxy fixture: passed, 1 passed / 0 failed.
+  - Unreadable route-table fail-closed fixture: passed, 1 passed / 0 failed.
+  - Full proxy regression: passed, 969 passed / 0 failed.
+  - Full Rust library suite: passed, 1801 passed / 0 failed / 2 ignored.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: corrected the stale process-local route-state comment; final guard pass clean.
+  - `test-guard`: clean; fake HTTP upstreams are boundary doubles and assertions cover observable routing, status codes, and persisted state.
+- Browser verification result: not applicable; this subtask changes proxy routing only.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Resolve a pin before global queue selection so a request owns an immutable provider snapshot.
+  - Route-table read failures are safety failures, not ordinary database errors, because silently falling back could consume another provider.
+  - A pinned request may update that provider's health but must not update the global current provider or invoke the failover switch manager.
+---
+
+## 2026-07-18 03:43 +08:00 - US-007-ST-003
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Added route metadata to session-list responses as `pinnedProviderId` and `lastSuccessfulProviderId` for Codex sessions only.
+  - Added `set_codex_session_provider`, validating the canonical session UUID and selected Codex provider before setting a pin; null clears only the pin.
+  - Removed persisted route rows after successful single or batch Codex session deletion.
+  - Made Codex provider deletion atomically clear matching pins while preserving last-success ownership.
+  - Added the Tauri registration, TypeScript fields, and frontend session API method.
+- Files changed
+  - `src-tauri/src/commands/session_manager.rs`
+  - `src-tauri/src/database/dao/codex_session_routes.rs`
+  - `src-tauri/src/database/dao/providers.rs`
+  - `src-tauri/src/database/mod.rs`
+  - `src-tauri/src/lib.rs`
+  - `src/lib/api/sessions.ts`
+  - `src/types.ts`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Session route command tests: passed, 3 passed / 0 failed.
+  - Codex session-route persistence and provider-deletion tests: passed, 7 passed / 0 failed.
+  - Full Rust library suite: passed, 1805 passed / 0 failed / 2 ignored.
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - `cargo fmt --manifest-path .\src-tauri\Cargo.toml -- --check`: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: canonicalized scanned UUIDs before route lookup and kept provider deletion atomic; final guard pass clean.
+  - `test-guard`: clean; command and cleanup tests use real SQLite state and observable returned metadata.
+- Browser verification result: not applicable; the selector UI is the next subtask.
+- Final deliverables:
+  none
+- **Learnings for future iterations:**
+  - Keep filesystem scanning independent, then enrich its result with one route-table query at the command boundary.
+  - Canonicalize scanned UUIDs before joining them to database keys.
+  - Provider deletion must clear pins in the same transaction as deleting the provider.
+---
+
+## 2026-07-18 04:12 +08:00 - US-007-ST-004
+- Story: US-007 - Pin Codex providers per conversation
+- What was implemented
+  - Added a Codex-only provider selector to the selected-session header before the delete action.
+  - Added Follow global routing plus every configured Codex provider and its advisory health state.
+  - Added Global or pinned-provider badges to Codex session rows.
+  - Saved route changes through the existing Tauri command, refreshed session data immediately, and showed that the next request changes while the current request is unaffected.
+  - Added Simplified Chinese, Traditional Chinese, English, and Japanese strings.
+- Files changed
+  - `src/components/sessions/CodexSessionProviderSelect.tsx`
+  - `src/components/sessions/SessionManagerPage.tsx`
+  - `src/components/sessions/SessionItem.tsx`
+  - `src/lib/query/mutations.ts`
+  - `src/types.ts`
+  - `src/i18n/locales/zh.json`
+  - `src/i18n/locales/zh-TW.json`
+  - `src/i18n/locales/en.json`
+  - `src/i18n/locales/ja.json`
+  - `tests/components/SessionManagerPage.test.tsx`
+  - `tests/msw/handlers.ts`
+  - `tests/msw/state.ts`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Quality checks run and results
+  - Session Manager component tests: passed, 17 passed / 0 failed.
+  - Full frontend suite with `--testTimeout=20000`: passed, 408 passed / 0 failed.
+  - Repository default 5-second timeout: 404 passed / 4 timed out in the existing App integration file; the same 4 tests passed with the explicit 20-second timeout.
+  - `node .\node_modules\typescript\bin\tsc --noEmit`: passed.
+  - Prettier check: passed.
+  - `git diff --check`: passed.
+  - `clean-code-guard`: removed blocking query invalidation from the success path and kept route errors visible; final guard pass clean.
+  - `test-guard`: replaced internal API spying with the existing MSW Tauri boundary and asserted observable UI state; final guard pass clean.
+- Browser verification result
+  - Passed at 1440x900 with three local fake providers: no selector/delete or selector/title overlap, no horizontal overflow, health states rendered, and no page errors.
+  - Screenshot: `C:/Users/tianh/.codex/visualizations/2026/07/16/019f6d0d-8659-7331-b242-15274a2b861d/codex-session-provider-routing.png`.
+- Final deliverables:
+  - Browser screenshot listed above.
+- **Learnings for future iterations:**
+  - Keep health status advisory in the selector because an explicit pin is still allowed to try a circuit-open provider.
+  - Update the session cache after the command succeeds so the selected route and list badge move together.
+  - The existing App integration test needs a larger timeout on this Windows host; its assertions are valid and pass at 20 seconds.
+---
+
+## 2026-07-18 05:27 +08:00 - US-007-ST-005
+- Story: US-007 - Pin Codex providers per conversation
+- What was completed
+  - Added a local HTTP fixture that sends three Codex sessions concurrently to three pinned providers without changing the global provider.
+  - Verified proxy restart persistence, manual A-to-B repinning, clearing B back to global C, and per-session last-success ownership.
+  - Updated the deployment guide with per-conversation binding, no-fallback behavior for pinned failures, advisory health semantics, clearing a pin, safe handoff behavior, and rollback steps.
+- Quality checks run and results
+  - Focused concurrent route fixture: passed, 1 passed / 0 failed.
+  - TypeScript: passed.
+  - Frontend: passed, 408 passed / 0 failed with a 60-second per-test limit. An initial run at 20 seconds had one existing App integration test time out at 20.08 seconds; the assertion suite passed on rerun.
+  - Rust: library 1806 passed / 0 failed / 2 ignored; every independent integration test target passed.
+  - Prettier, Rust format, and `git diff --check`: passed.
+  - Vite production build and Rust release build: passed in a clean detached worktree at `c2ce97de`.
+  - NSIS-only bundle: passed after disabling updater artifact creation for this unsigned local build. MSI/WiX and updater signing were not run.
+- Final deliverables
+  - EXE SHA-256: `366D852D15E332F689D3148E68FA9B368006597E29EC0CBD8418643F2E76F939`.
+  - NSIS SHA-256: `319EABA30D6AB24C4B97C5FC4CA10535B2CFCD303422C57E3A395C2A25896717`.
+  - NSIS retains the existing `__TAURI_BUNDLE_TYPE` warning, so updater compatibility remains unverified.
+  - No paid-provider request was sent, Codex App and CLI HOME behavior was unchanged, and the running installation was not replaced.
+- Test guard: clean; the new fixture uses real SQLite state and a local HTTP boundary, and asserts observable routing and persisted ownership.
+- Docs guard: clean after matching every command, setting key, error code, route behavior, artifact path, and hash to source or direct output.
+- **Learnings for future iterations:**
+  - Build final artifacts from a clean worktree when another task owns unrelated dirty Rust files.
+  - Disable updater artifact generation for unsigned local NSIS verification instead of treating the missing private key as an installer failure.
+---

@@ -12,8 +12,17 @@ use super::{
     log_codes::fwd as log_fwd,
     provider_router::ProviderRouter,
     providers::{
-        codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore, get_adapter,
-        AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
+        codex_chat_history::CodexChatHistoryStore,
+        codex_portable_handoff::{
+            contains_portable_transcript, inject_portable_transcript, needs_portable_transcript,
+            sanitize_codex_handoff_request,
+        },
+        codex_rollout_transcript::{
+            read_visible_transcript, RolloutTranscriptError, VisibleTranscript,
+        },
+        codex_route_state::{CodexRouteAttempt, CodexRouteState},
+        gemini_shadow::GeminiShadowStore,
+        get_adapter, AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
     },
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
@@ -50,6 +59,8 @@ pub struct ForwardResult {
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
+    /// Codex session ownership is committed only after the response completes.
+    pub(crate) codex_route_attempt: Option<CodexRouteAttempt>,
 }
 
 pub struct ForwardError {
@@ -102,6 +113,7 @@ pub struct RequestForwarder {
     current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
+    codex_route_state: Arc<CodexRouteState>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -112,6 +124,13 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    /// A pinned request must never mutate global provider selection or tray state.
+    session_provider_pinned: bool,
+    /// Commit the selected provider as the session pin only after full success.
+    session_repin_on_success: bool,
+    /// Whether provider changes may reconstruct visible context from the local Codex rollout.
+    /// Provider-bound state is sanitized regardless of this setting.
+    codex_portable_handoff_on_provider_change: bool,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -184,11 +203,15 @@ impl RequestForwarder {
         current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
         gemini_shadow: Arc<GeminiShadowStore>,
         codex_chat_history: Arc<CodexChatHistoryStore>,
+        codex_route_state: Arc<CodexRouteState>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
+        session_provider_pinned: bool,
+        session_repin_on_success: bool,
+        codex_portable_handoff_on_provider_change: bool,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
@@ -205,11 +228,15 @@ impl RequestForwarder {
             current_providers,
             gemini_shadow,
             codex_chat_history,
+            codex_route_state,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            session_provider_pinned,
+            session_repin_on_success,
+            codex_portable_handoff_on_provider_change,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -219,6 +246,59 @@ impl RequestForwarder {
             ),
             max_attempts,
         }
+    }
+
+    fn prepare_codex_handoff_attempt(
+        &self,
+        app_type: &AppType,
+        endpoint: &str,
+        provider: &Provider,
+        body: Value,
+    ) -> Result<(Value, Option<CodexRouteAttempt>), ProxyError> {
+        let path = endpoint.split('?').next().unwrap_or(endpoint);
+        if !matches!(app_type, AppType::Codex)
+            || !matches!(path, "/responses" | "/responses/compact")
+            || !self.session_client_provided
+        {
+            return Ok((body, None));
+        }
+
+        let attempt = self
+            .codex_route_state
+            .begin_attempt_with_boundary_and_repin(
+                self.session_id.clone(),
+                provider.id.clone(),
+                self.session_provider_pinned,
+                self.session_repin_on_success,
+            );
+        let body = if attempt.is_provider_change() {
+            self.portable_codex_body_with_reader(body, read_visible_transcript)?
+        } else {
+            body
+        };
+        Ok((body, Some(attempt)))
+    }
+
+    fn portable_codex_body_with_reader<R>(
+        &self,
+        body: Value,
+        transcript_reader: R,
+    ) -> Result<Value, ProxyError>
+    where
+        R: FnOnce(&str) -> Result<VisibleTranscript, RolloutTranscriptError>,
+    {
+        let sanitized = sanitize_codex_handoff_request(&body, true).into_owned();
+        if !self.codex_portable_handoff_on_provider_change {
+            return Ok(sanitized);
+        }
+        if !needs_portable_transcript(&body, &sanitized) {
+            return Ok(sanitized);
+        }
+
+        let transcript = transcript_reader(&self.session_id)
+            .map_err(|_| ProxyError::PortableHandoffUnavailable)?;
+        inject_portable_transcript(sanitized, transcript)
+            .map_err(|_| ProxyError::PortableHandoffUnavailable)
     }
 
     async fn record_success_result(
@@ -253,6 +333,42 @@ impl RequestForwarder {
                 );
             }
         });
+    }
+
+    async fn record_successful_forward(&self, provider: &Provider, app_type: &str) {
+        if !self.session_provider_pinned {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type.to_string(),
+                (provider.id.clone(), provider.name.clone()),
+            );
+        }
+
+        let mut status = self.status.write().await;
+        status.success_requests += 1;
+        status.last_error = None;
+
+        let should_switch = !self.session_provider_pinned
+            && self.current_provider_id_at_start.as_str() != provider.id.as_str();
+        if should_switch {
+            status.failover_count += 1;
+
+            let failover_manager = self.failover_manager.clone();
+            let app_handle = self.app_handle.clone();
+            let provider_id = provider.id.clone();
+            let provider_name = provider.name.clone();
+            let app_type = app_type.to_string();
+            tokio::spawn(async move {
+                let _ = failover_manager
+                    .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                    .await;
+            });
+        }
+
+        if status.total_requests > 0 {
+            status.success_rate =
+                (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+        }
     }
 
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
@@ -431,19 +547,32 @@ impl RequestForwarder {
 
             // PRE-SEND 优化器：每个 provider 独立决定是否优化
             // clone body 以避免 Bedrock 优化字段泄漏到非 Bedrock provider（failover 场景）
-            let mut provider_body =
-                if self.optimizer_config.enabled && is_bedrock_provider(provider) {
-                    let mut b = body.clone();
-                    if self.optimizer_config.thinking_optimizer {
-                        super::thinking_optimizer::optimize(&mut b, &self.optimizer_config);
-                    }
-                    if self.optimizer_config.cache_injection {
-                        super::cache_injector::inject(&mut b, &self.optimizer_config);
-                    }
-                    b
-                } else {
-                    body.clone()
-                };
+            let provider_body = if self.optimizer_config.enabled && is_bedrock_provider(provider) {
+                let mut b = body.clone();
+                if self.optimizer_config.thinking_optimizer {
+                    super::thinking_optimizer::optimize(&mut b, &self.optimizer_config);
+                }
+                if self.optimizer_config.cache_injection {
+                    super::cache_injector::inject(&mut b, &self.optimizer_config);
+                }
+                b
+            } else {
+                body.clone()
+            };
+            let (mut provider_body, mut codex_route_attempt) = match self
+                .prepare_codex_handoff_attempt(app_type, endpoint, provider, provider_body)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.router
+                        .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+                        .await;
+                    return Err(ForwardError {
+                        error,
+                        provider: Some(provider.clone()),
+                    });
+                }
+            };
 
             attempted_providers += 1;
 
@@ -452,7 +581,7 @@ impl RequestForwarder {
             // total_requests / last_request_at / active_connections 已由
             // forward_with_retry wrapper 在客户端请求维度统一处理，这里只刷
             // 新「正在尝试哪个 provider」的展示字段。
-            {
+            if !self.session_provider_pinned {
                 let mut status = self.status.write().await;
                 status.current_provider = Some(provider.name.clone());
                 status.current_provider_id = Some(provider.id.clone());
@@ -478,43 +607,7 @@ impl RequestForwarder {
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
                         .await;
 
-                    // 更新当前应用类型使用的 provider
-                    {
-                        let mut current_providers = self.current_providers.write().await;
-                        current_providers.insert(
-                            app_type_str.to_string(),
-                            (provider.id.clone(), provider.name.clone()),
-                        );
-                    }
-
-                    // 更新成功统计
-                    {
-                        let mut status = self.status.write().await;
-                        status.success_requests += 1;
-                        status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
-                        if should_switch {
-                            status.failover_count += 1;
-
-                            // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
-                            let fm = self.failover_manager.clone();
-                            let ah = self.app_handle.clone();
-                            let pid = provider.id.clone();
-                            let pname = provider.name.clone();
-                            let at = app_type_str.to_string();
-
-                            tokio::spawn(async move {
-                                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
-                            });
-                        }
-                        // 重新计算成功率
-                        if status.total_requests > 0 {
-                            status.success_rate = (status.success_requests as f32
-                                / status.total_requests as f32)
-                                * 100.0;
-                        }
-                    }
+                    self.record_successful_forward(provider, app_type_str).await;
 
                     return Ok(ForwardResult {
                         response,
@@ -522,6 +615,7 @@ impl RequestForwarder {
                         claude_api_format,
                         outbound_model,
                         connection_guard: None,
+                        codex_route_attempt: codex_route_attempt.take(),
                     });
                 }
                 Err(e) => {
@@ -582,42 +676,7 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
+                                    self.record_successful_forward(provider, app_type_str).await;
 
                                     return Ok(ForwardResult {
                                         response,
@@ -625,6 +684,7 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        codex_route_attempt: codex_route_attempt.take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -726,47 +786,8 @@ impl RequestForwarder {
                                         )
                                         .await;
 
-                                        // 更新当前应用类型使用的 provider
-                                        {
-                                            let mut current_providers =
-                                                self.current_providers.write().await;
-                                            current_providers.insert(
-                                                app_type_str.to_string(),
-                                                (provider.id.clone(), provider.name.clone()),
-                                            );
-                                        }
-
-                                        // 更新成功统计
-                                        {
-                                            let mut status = self.status.write().await;
-                                            status.success_requests += 1;
-                                            status.last_error = None;
-                                            let should_switch =
-                                                self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
-                                            if should_switch {
-                                                status.failover_count += 1;
-
-                                                // 异步触发供应商切换，更新 UI/托盘
-                                                let fm = self.failover_manager.clone();
-                                                let ah = self.app_handle.clone();
-                                                let pid = provider.id.clone();
-                                                let pname = provider.name.clone();
-                                                let at = app_type_str.to_string();
-
-                                                tokio::spawn(async move {
-                                                    let _ = fm
-                                                        .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                        .await;
-                                                });
-                                            }
-                                            if status.total_requests > 0 {
-                                                status.success_rate = (status.success_requests
-                                                    as f32
-                                                    / status.total_requests as f32)
-                                                    * 100.0;
-                                            }
-                                        }
+                                        self.record_successful_forward(provider, app_type_str)
+                                            .await;
 
                                         return Ok(ForwardResult {
                                             response,
@@ -774,6 +795,7 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             connection_guard: None,
+                                            codex_route_attempt: codex_route_attempt.take(),
                                         });
                                     }
                                     Err(retry_err) => {
@@ -892,41 +914,7 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
+                                    self.record_successful_forward(provider, app_type_str).await;
 
                                     return Ok(ForwardResult {
                                         response,
@@ -934,6 +922,7 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        codex_route_attempt: codex_route_attempt.take(),
                                     });
                                 }
                                 Err(retry_err) => {
@@ -1105,6 +1094,8 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        let omit_body_from_debug_log = contains_portable_transcript(body);
+
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
@@ -1302,6 +1293,9 @@ impl RequestForwarder {
         };
         let codex_responses_to_chat = matches!(app_type, AppType::Codex)
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
+        if matches!(app_type, AppType::Codex) {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
         } else if needs_transform && adapter.name() == "Claude" {
@@ -1357,7 +1351,6 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
-            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -1867,7 +1860,9 @@ impl RequestForwarder {
             .unwrap_or("<none>");
         log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
         if log::log_enabled!(log::Level::Debug) {
-            if let Ok(body_str) = serde_json::to_string(&filtered_body) {
+            if omit_body_from_debug_log {
+                log::debug!("[{tag}] >>> 请求体内容已省略 (portable handoff)");
+            } else if let Ok(body_str) = serde_json::to_string(&filtered_body) {
                 log::debug!(
                     "[{tag}] >>> 请求体内容 ({}字节): {}",
                     body_str.len(),
@@ -2793,6 +2788,9 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::provider::LocalProxyRequestOverrides;
+    use crate::proxy::providers::codex_rollout_transcript::{
+        VisibleContent, VisibleRole, VisibleTranscriptEntry,
+    };
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
@@ -2833,11 +2831,15 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            codex_route_state: Arc::new(CodexRouteState::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            session_provider_pinned: false,
+            session_repin_on_success: false,
+            codex_portable_handoff_on_provider_change: true,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -2877,6 +2879,41 @@ mod tests {
     #[test]
     fn single_provider_has_no_terminal_all_failed_log() {
         assert!(build_terminal_failure_log(1, 1, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn pinned_success_keeps_global_provider_state_unchanged() {
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.session_provider_pinned = true;
+        forwarder.current_provider_id_at_start = "global-provider".to_string();
+        forwarder.current_providers.write().await.insert(
+            "codex".to_string(),
+            ("global-provider".to_string(), "Global Provider".to_string()),
+        );
+        let provider = Provider::with_id(
+            "pinned-provider".to_string(),
+            "Pinned Provider".to_string(),
+            json!({}),
+            None,
+        );
+
+        forwarder
+            .record_successful_forward(&provider, "codex")
+            .await;
+
+        assert_eq!(
+            forwarder
+                .current_providers
+                .read()
+                .await
+                .get("codex")
+                .map(|(id, _)| id.as_str()),
+            Some("global-provider")
+        );
+        let status = forwarder.status.read().await;
+        assert_eq!(status.success_requests, 1);
+        assert_eq!(status.failover_count, 0);
+        assert_eq!(status.current_provider_id, None);
     }
 
     #[test]
@@ -3190,6 +3227,373 @@ mod tests {
         };
 
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
+    }
+
+    #[test]
+    fn codex_provider_candidates_sanitize_handoffs_independently() {
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "session-1".to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt("session-1", &provider_a.id)
+            .complete_successfully();
+
+        let original = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "message", "id": "msg_provider_a", "role": "user", "content": "hello"},
+                {"type": "message", "id": "msg_provider_a_reply", "role": "assistant", "content": "hi"}
+            ]
+        });
+
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let (body_for_b, attempt_b) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_b,
+                original.clone(),
+            )
+            .expect("prepare provider B");
+        assert!(body_for_b.get("previous_response_id").is_none());
+        assert!(body_for_b["input"][0].get("id").is_none());
+        drop(attempt_b);
+
+        let mut provider_c = provider_a.clone();
+        provider_c.id = "provider-c".to_string();
+        let (body_for_c, attempt_c) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_c,
+                original.clone(),
+            )
+            .expect("prepare provider C");
+        assert!(body_for_c.get("previous_response_id").is_none());
+        assert!(body_for_c["input"][0].get("id").is_none());
+        drop(attempt_c);
+    }
+
+    #[test]
+    fn persisted_owner_after_restart_drives_handoff_sanitization() {
+        const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_last_successful_provider(SESSION_ID, "provider-a")
+            .expect("persist prior owner");
+
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.codex_route_state = Arc::new(CodexRouteState::with_database(db));
+        forwarder.session_id = format!("codex_{SESSION_ID}");
+        forwarder.session_client_provided = true;
+        forwarder.session_provider_pinned = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+
+        let mut provider_b = test_provider_with_type(Some("openai"));
+        provider_b.id = "provider-b".to_string();
+        let original = json!({
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "message", "id": "msg_provider_a", "role": "user", "content": "hello"}
+            ]
+        });
+
+        let (body, attempt) = forwarder
+            .prepare_codex_handoff_attempt(&AppType::Codex, "/responses", &provider_b, original)
+            .expect("prepare persisted handoff");
+
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body["input"][0].get("id").is_none());
+        assert_eq!(
+            attempt
+                .as_ref()
+                .and_then(CodexRouteAttempt::previous_provider_id),
+            Some("provider-a")
+        );
+    }
+
+    #[test]
+    fn first_explicit_pin_with_unknown_owner_sanitizes_conservatively() {
+        const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = format!("codex_{SESSION_ID}");
+        forwarder.session_client_provided = true;
+        forwarder.session_provider_pinned = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+
+        let mut provider = test_provider_with_type(Some("openai"));
+        provider.id = "provider-b".to_string();
+        let original = json!({
+            "previous_response_id": "resp_unknown_owner",
+            "input": [
+                {"type": "message", "id": "msg_unknown_owner", "role": "user", "content": "hello"}
+            ]
+        });
+
+        let (body, attempt) = forwarder
+            .prepare_codex_handoff_attempt(&AppType::Codex, "/responses", &provider, original)
+            .expect("prepare conservative first pin");
+
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body["input"][0].get("id").is_none());
+        assert!(attempt.expect("route attempt").is_provider_change());
+    }
+
+    #[test]
+    fn successful_gateway_handoff_repins_persistent_session() {
+        const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.set_codex_session_pinned_success(SESSION_ID, "provider-a")
+            .expect("seed original pin");
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.codex_route_state = Arc::new(CodexRouteState::with_database(db.clone()));
+        forwarder.session_id = format!("codex_{SESSION_ID}");
+        forwarder.session_client_provided = true;
+        forwarder.session_provider_pinned = true;
+        forwarder.session_repin_on_success = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+        let mut gateway = test_provider_with_type(Some("openai"));
+        gateway.id = "gateway".to_string();
+
+        let (_, attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &gateway,
+                json!({"input": []}),
+            )
+            .expect("prepare gateway handoff");
+        attempt
+            .expect("persistent route attempt")
+            .complete_successfully();
+
+        let route = db
+            .get_codex_session_route(SESSION_ID)
+            .expect("read migrated route")
+            .expect("migrated route");
+        assert_eq!(route.pinned_provider_id.as_deref(), Some("gateway"));
+        assert_eq!(
+            route.last_successful_provider_id.as_deref(),
+            Some("gateway")
+        );
+    }
+
+    #[test]
+    fn codex_handoff_sanitization_is_scoped_to_responses_provider_changes() {
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "session-1".to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt("session-1", &provider_a.id)
+            .complete_successfully();
+
+        let original = json!({"previous_response_id": "resp_provider_a", "input": []});
+        let (same_provider_body, same_provider_attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/responses",
+                &provider_a,
+                original.clone(),
+            )
+            .expect("prepare same provider");
+        assert_eq!(same_provider_body, original);
+        drop(same_provider_attempt);
+
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let (chat_body, chat_attempt) = forwarder
+            .prepare_codex_handoff_attempt(
+                &AppType::Codex,
+                "/chat/completions",
+                &provider_b,
+                original.clone(),
+            )
+            .expect("prepare chat request");
+        assert_eq!(chat_body, original);
+        assert!(chat_attempt.is_none());
+    }
+
+    #[test]
+    fn compacted_provider_handoff_injects_visible_transcript_as_text() {
+        const SESSION_ID: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b18";
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = SESSION_ID.to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_a.id)
+            .complete_successfully();
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+
+        let original = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "compaction", "id": "cmp_a", "encrypted_content": "opaque"},
+                {"type": "message", "role": "user", "content": "current unique input"}
+            ]
+        });
+        let transcript = VisibleTranscript {
+            entries: vec![
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier request".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::Assistant,
+                    content: vec![VisibleContent::Text {
+                        text: "earlier answer".to_string(),
+                    }],
+                },
+                VisibleTranscriptEntry::ToolResult {
+                    call_id: "call_history".to_string(),
+                    output: "historical tool output".to_string(),
+                },
+                VisibleTranscriptEntry::Message {
+                    role: VisibleRole::User,
+                    content: vec![VisibleContent::Text {
+                        text: "current unique input".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let attempt = forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_b.id);
+        assert!(attempt.is_provider_change());
+        let body = forwarder
+            .portable_codex_body_with_reader(original, |session_id| {
+                assert_eq!(session_id, SESSION_ID);
+                Ok(transcript)
+            })
+            .expect("prepare compacted handoff");
+
+        assert!(body.get("previous_response_id").is_none());
+        assert!(!body.to_string().contains("opaque"));
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        let context_text = input[0]["content"][0]["text"]
+            .as_str()
+            .expect("context text");
+        assert!(context_text.contains("--- BEGIN PORTABLE VISIBLE TRANSCRIPT ---"));
+        assert!(context_text.contains("earlier request"));
+        assert!(context_text.contains("earlier answer"));
+        assert!(context_text.contains("historical tool output"));
+        assert!(!context_text.contains("current unique input"));
+        assert_eq!(body.to_string().matches("current unique input").count(), 1);
+        assert!(input
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("function_call")));
+        drop(attempt);
+    }
+
+    #[test]
+    fn compacted_handoff_fails_closed_when_transcript_is_missing() {
+        const SESSION_ID: &str = "019cc369-bd7c-7891-b371-7b20b4fe0b18";
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = SESSION_ID.to_string();
+        forwarder.session_client_provided = true;
+
+        let mut provider_a = test_provider_with_type(Some("openai"));
+        provider_a.id = "provider-a".to_string();
+        forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_a.id)
+            .complete_successfully();
+        let mut provider_b = provider_a.clone();
+        provider_b.id = "provider-b".to_string();
+        let original = json!({
+            "previous_response_id": "resp_provider_a",
+            "input": [
+                {"type": "compaction", "encrypted_content": "opaque"},
+                {"type": "message", "role": "user", "content": "continue"}
+            ]
+        });
+
+        let attempt = forwarder
+            .codex_route_state
+            .begin_attempt(SESSION_ID, &provider_b.id);
+        assert!(attempt.is_provider_change());
+        let error = forwarder
+            .portable_codex_body_with_reader(original, |session_id| {
+                Err(RolloutTranscriptError::Missing {
+                    session_id: session_id.to_string(),
+                })
+            })
+            .expect_err("missing transcript must fail closed");
+
+        assert!(matches!(error, ProxyError::PortableHandoffUnavailable));
+        drop(attempt);
+    }
+
+    #[test]
+    fn disabled_portable_handoff_skips_rollout_but_still_sanitizes_provider_state() {
+        use std::cell::Cell;
+
+        let mut forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        forwarder.session_id = "019cc369-bd7c-7891-b371-7b20b4fe0b18".to_string();
+        forwarder.session_client_provided = true;
+        forwarder.codex_portable_handoff_on_provider_change = false;
+
+        let reader_called = Cell::new(false);
+        let body = forwarder
+            .portable_codex_body_with_reader(
+                json!({
+                    "model": "gpt-test",
+                    "previous_response_id": "resp_provider_a",
+                    "input": [
+                        {
+                            "type": "compaction",
+                            "id": "cmp_provider_a",
+                            "encrypted_content": "opaque-compaction"
+                        },
+                        {
+                            "type": "reasoning",
+                            "id": "reasoning_provider_a",
+                            "encrypted_content": "opaque-reasoning"
+                        },
+                        {
+                            "type": "message",
+                            "id": "msg_provider_a",
+                            "role": "user",
+                            "content": "continue safely"
+                        }
+                    ]
+                }),
+                |_| {
+                    reader_called.set(true);
+                    Ok(VisibleTranscript { entries: vec![] })
+                },
+            )
+            .expect("disabled portable handoff should continue with sanitized input");
+
+        assert!(!reader_called.get(), "rollout reader must not be called");
+        assert!(body.get("previous_response_id").is_none());
+        assert!(!body.to_string().contains("resp_provider_a"));
+        assert!(!body.to_string().contains("opaque-compaction"));
+        assert!(!body.to_string().contains("opaque-reasoning"));
+        assert!(!body
+            .to_string()
+            .contains("--- BEGIN PORTABLE VISIBLE TRANSCRIPT ---"));
+        assert_eq!(body["input"].as_array().expect("input array").len(), 1);
+        assert_eq!(body["input"][0]["content"], "continue safely");
+        assert!(body["input"][0].get("id").is_none());
     }
 
     #[test]
