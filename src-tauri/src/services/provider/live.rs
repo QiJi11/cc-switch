@@ -822,6 +822,74 @@ fn strip_injected_kimi_for_coding_context_defaults(settings: &mut Value, provide
     }
 }
 
+fn normalized_codex_base_url(settings: &Value) -> Option<String> {
+    settings
+        .get("config")
+        .and_then(Value::as_str)
+        .and_then(crate::codex_config::extract_codex_base_url)
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+}
+
+fn codex_route_api_key(settings: &Value) -> Option<String> {
+    crate::codex_config::extract_codex_api_key(
+        settings.get("auth"),
+        settings.get("config").and_then(Value::as_str),
+    )
+}
+
+fn codex_official_account_id(settings: &Value) -> Option<String> {
+    settings
+        .pointer("/auth/tokens/account_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|account_id| !account_id.is_empty())
+        .map(str::to_string)
+}
+
+fn codex_official_route_matches(provider: &Provider, live_settings: &Value) -> bool {
+    if let Some(stored_account_id) = codex_official_account_id(&provider.settings_config) {
+        return codex_official_account_id(live_settings).as_deref()
+            == Some(stored_account_id.as_str());
+    }
+    if let Some(stored_api_key) = codex_route_api_key(&provider.settings_config) {
+        return codex_route_api_key(live_settings).as_deref() == Some(stored_api_key.as_str());
+    }
+
+    let stored_auth = provider.settings_config.get("auth");
+    if stored_auth
+        .is_none_or(|auth| !crate::codex_config::codex_auth_has_credential_login_material(auth))
+    {
+        return true;
+    }
+
+    stored_auth == live_settings.get("auth")
+}
+
+pub(super) fn codex_live_route_matches_provider(
+    provider: &Provider,
+    live_settings: &Value,
+) -> bool {
+    let stored_base_url = normalized_codex_base_url(&provider.settings_config);
+    let live_base_url = normalized_codex_base_url(live_settings);
+
+    if provider.category.as_deref() == Some("official") {
+        return stored_base_url == live_base_url
+            && codex_official_route_matches(provider, live_settings);
+    }
+
+    matches!(
+        (
+            stored_base_url,
+            live_base_url,
+            codex_route_api_key(&provider.settings_config),
+            codex_route_api_key(live_settings),
+        ),
+        (Some(stored_url), Some(live_url), Some(stored_key), Some(live_key))
+            if stored_url == live_url && stored_key == live_key
+    )
+}
+
 fn restore_live_settings_for_provider_backfill(
     app_type: &AppType,
     provider: &Provider,
@@ -2476,6 +2544,180 @@ base_url = "https://a.example/v1"
             .map(|value| value.as_str().expect("tool id should be string"))
             .collect();
         assert_eq!(values, vec!["tool2"]);
+    }
+
+    #[test]
+    fn codex_backfill_route_guard_rejects_foreign_live() {
+        let provider = Provider::with_id(
+            "stored".to_string(),
+            "Stored".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "key-a" },
+                "config": "model_provider = \"stored\"\n\
+                           [model_providers.stored]\n\
+                           base_url = \"https://stored.example/v1\"\n",
+            }),
+            None,
+        );
+        let live_settings = json!({
+            "auth": { "OPENAI_API_KEY": "key-b" },
+            "config": "model_provider = \"foreign\"\n\
+                       [model_providers.foreign]\n\
+                       base_url = \"https://foreign.example/v1\"\n",
+        });
+        let same_url_different_key = json!({
+            "auth": { "OPENAI_API_KEY": "key-b" },
+            "config": "model_provider = \"stored\"\n\
+                       [model_providers.stored]\n\
+                       base_url = \"https://stored.example/v1\"\n",
+        });
+
+        assert!(!codex_live_route_matches_provider(
+            &provider,
+            &live_settings
+        ));
+        assert!(!codex_live_route_matches_provider(
+            &provider,
+            &same_url_different_key
+        ));
+    }
+
+    #[test]
+    fn codex_backfill_route_guard_accepts_same_route_with_live_model_changes() {
+        let provider = Provider::with_id(
+            "stored".to_string(),
+            "Stored".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "same-key" },
+                "config": "model_provider = \"stored\"\n\
+                           model = \"old-model\"\n\
+                           [model_providers.stored]\n\
+                           base_url = \"https://stored.example/v1\"\n",
+            }),
+            None,
+        );
+        let live_settings = json!({
+            "auth": { "OPENAI_API_KEY": "same-key" },
+            "config": "model_provider = \"stored\"\n\
+                       model = \"new-model\"\n\
+                       model_reasoning_effort = \"xhigh\"\n\
+                       [model_providers.stored]\n\
+                       base_url = \"https://stored.example/v1/\"\n",
+        });
+
+        assert!(codex_live_route_matches_provider(&provider, &live_settings));
+    }
+
+    #[test]
+    fn codex_backfill_route_guard_rejects_incomplete_custom_identity() {
+        let complete_provider = Provider::with_id(
+            "stored".to_string(),
+            "Stored".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "same-key" },
+                "config": "model_provider = \"stored\"\n\
+                           [model_providers.stored]\n\
+                           base_url = \"https://stored.example/v1\"\n",
+            }),
+            None,
+        );
+        let missing_url = json!({
+            "auth": { "OPENAI_API_KEY": "same-key" },
+            "config": "model = \"gpt-5.5\"\n",
+        });
+        let missing_key = json!({
+            "auth": {},
+            "config": "model_provider = \"stored\"\n\
+                       [model_providers.stored]\n\
+                       base_url = \"https://stored.example/v1\"\n",
+        });
+
+        assert!(!codex_live_route_matches_provider(
+            &complete_provider,
+            &missing_url
+        ));
+        assert!(!codex_live_route_matches_provider(
+            &complete_provider,
+            &missing_key
+        ));
+    }
+
+    #[test]
+    fn codex_backfill_route_guard_matches_official_account_identity() {
+        let mut provider = Provider::with_id(
+            "official-a".to_string(),
+            "Official A".to_string(),
+            json!({
+                "auth": {
+                    "tokens": {
+                        "account_id": "acct-a",
+                        "access_token": "old-token"
+                    }
+                },
+                "config": ""
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        let same_account = json!({
+            "auth": {
+                "tokens": {
+                    "account_id": "acct-a",
+                    "access_token": "refreshed-token"
+                }
+            },
+            "config": ""
+        });
+        let different_account = json!({
+            "auth": {
+                "tokens": {
+                    "account_id": "acct-b",
+                    "access_token": "other-token"
+                }
+            },
+            "config": ""
+        });
+
+        assert!(codex_live_route_matches_provider(&provider, &same_account));
+        assert!(!codex_live_route_matches_provider(
+            &provider,
+            &different_account
+        ));
+    }
+
+    #[test]
+    fn codex_backfill_route_guard_requires_exact_unidentified_official_auth() {
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "Official".to_string(),
+            json!({
+                "auth": {
+                    "tokens": {
+                        "access_token": "same-token",
+                        "refresh_token": "same-refresh"
+                    }
+                },
+                "config": ""
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        let same_auth = provider.settings_config.clone();
+        let refreshed_without_account_id = json!({
+            "auth": {
+                "tokens": {
+                    "access_token": "new-token",
+                    "refresh_token": "same-refresh"
+                }
+            },
+            "config": ""
+        });
+
+        assert!(codex_live_route_matches_provider(&provider, &same_auth));
+        assert!(!codex_live_route_matches_provider(
+            &provider,
+            &refreshed_without_account_id
+        ));
     }
 
     #[test]
