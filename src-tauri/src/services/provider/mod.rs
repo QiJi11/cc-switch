@@ -5214,13 +5214,27 @@ impl ProviderService {
                 // Additive mode apps - all providers coexist in the same file,
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
                 if !app_type.is_additive_mode() {
-                    // Only backfill when switching to a different provider
+                    // For Codex the current-provider row must exist to prove
+                    // ownership; a missing row fails closed regardless of
+                    // whether live is readable.
+                    if matches!(app_type, AppType::Codex) && !providers.contains_key(&current_id) {
+                        log::warn!(
+                            "Refusing Codex provider switch because the current provider row is missing '{}'",
+                            current_id
+                        );
+                        return Err(AppError::localized(
+                            "switch.codex_live_route_mismatch",
+                            "Codex 当前供应商记录缺失。为避免覆盖 Live 配置，本次切换已取消；请先重新应用当前供应商。",
+                            "The Codex current-provider row is missing. The switch was cancelled; reapply the current provider first.",
+                        ));
+                    }
+
+                    // Only backfill when switching to a different provider.
                     // For Codex the switch must fail closed when the live route
                     // ownership cannot be established: a live config that exists
-                    // but cannot be read, or a missing current-provider row,
-                    // would otherwise let the switch proceed to overwrite live
-                    // without proof. A completely missing live config stays
-                    // allowed so first-time setup and recovery still work.
+                    // but cannot be read would otherwise let the switch proceed
+                    // to overwrite live without proof. A completely missing live
+                    // config stays allowed so first-time setup and recovery work.
                     let live_config = match read_live_settings(app_type.clone()) {
                         Ok(config) => Some(config),
                         Err(e)
@@ -5287,16 +5301,6 @@ impl ProviderService {
                             } else {
                                 backfill_completed = true;
                             }
-                        } else if matches!(app_type, AppType::Codex) {
-                            log::warn!(
-                                "Refusing Codex provider switch because the current provider row is missing '{}'",
-                                current_id
-                            );
-                            return Err(AppError::localized(
-                                "switch.codex_live_route_mismatch",
-                                "Codex 当前供应商记录缺失。为避免覆盖 Live 配置，本次切换已取消；请先重新应用当前供应商。",
-                                "The Codex current-provider row is missing. The switch was cancelled; reapply the current provider first.",
-                            ));
                         }
                     }
                 }
