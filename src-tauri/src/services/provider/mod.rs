@@ -5215,7 +5215,32 @@ impl ProviderService {
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
                 if !app_type.is_additive_mode() {
                     // Only backfill when switching to a different provider
-                    if let Ok(live_config) = read_live_settings(app_type.clone()) {
+                    // For Codex the switch must fail closed when the live route
+                    // ownership cannot be established: a live config that exists
+                    // but cannot be read, or a missing current-provider row,
+                    // would otherwise let the switch proceed to overwrite live
+                    // without proof. A completely missing live config stays
+                    // allowed so first-time setup and recovery still work.
+                    let live_config = match read_live_settings(app_type.clone()) {
+                        Ok(config) => Some(config),
+                        Err(e)
+                            if matches!(app_type, AppType::Codex)
+                                && !matches!(&e, AppError::Localized { key, .. }
+                                    if *key == "codex.live.missing") =>
+                        {
+                            log::warn!(
+                                "Refusing Codex provider switch because the live config could not be read for current provider '{}': {e}",
+                                current_id
+                            );
+                            return Err(AppError::localized(
+                                "switch.codex_live_route_mismatch",
+                                "Codex Live 配置无法读取。为避免覆盖无法确认归属的 Live 配置，本次切换已取消；请先重新应用当前供应商或修复 Live 配置。",
+                                "Codex live configuration could not be read. The switch was cancelled to avoid overwriting a live state whose ownership could not be verified; reapply the current provider or repair the live configuration first.",
+                            ));
+                        }
+                        Err(_) => None,
+                    };
+                    if let Some(live_config) = live_config {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
                             if matches!(app_type, AppType::Codex)
                                 && !live::codex_live_route_matches_provider(
@@ -5262,6 +5287,16 @@ impl ProviderService {
                             } else {
                                 backfill_completed = true;
                             }
+                        } else if matches!(app_type, AppType::Codex) {
+                            log::warn!(
+                                "Refusing Codex provider switch because the current provider row is missing '{}'",
+                                current_id
+                            );
+                            return Err(AppError::localized(
+                                "switch.codex_live_route_mismatch",
+                                "Codex 当前供应商记录缺失。为避免覆盖 Live 配置，本次切换已取消；请先重新应用当前供应商。",
+                                "The Codex current-provider row is missing. The switch was cancelled; reapply the current provider first.",
+                            ));
                         }
                     }
                 }

@@ -1708,6 +1708,213 @@ requires_openai_auth = true
     );
 }
 
+/// 2026-08-13 hardening: a Codex live config that exists but cannot be read
+/// must fail closed instead of letting the switch overwrite it without proof.
+#[test]
+fn provider_service_switch_codex_fails_closed_when_live_config_unreadable() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config_path = cc_switch_lib::get_codex_config_path();
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create codex home");
+    std::fs::write(&config_path, "model_provider = [broken toml\n")
+        .expect("seed unreadable live config");
+    let corrupt_live_config = std::fs::read_to_string(&config_path).expect("read seeded config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-provider".to_string();
+
+        let mut stored_provider = Provider::with_id(
+            "stored-provider".to_string(),
+            "Stored Provider".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "stored-key" },
+                "config": r#"model_provider = "stored"
+
+[model_providers.stored]
+name = "Stored"
+base_url = "https://stored.example/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        stored_provider.meta = Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("stored-provider".to_string(), stored_provider);
+        manager.providers.insert(
+            "target-provider".to_string(),
+            Provider::with_id(
+                "target-provider".to_string(),
+                "Target Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "target-key" },
+                    "config": r#"model_provider = "target"
+
+[model_providers.target]
+name = "Target"
+base_url = "https://target.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let original_snippet = "[tui]\nnotifications = true\n";
+    state
+        .db
+        .set_config_snippet(AppType::Codex.as_str(), Some(original_snippet.to_string()))
+        .expect("seed common config snippet");
+    let stored_before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers before switch")["stored-provider"]
+        .settings_config
+        .clone();
+
+    let err = ProviderService::switch(&state, AppType::Codex, "target-provider")
+        .expect_err("unreadable live config must fail closed");
+    match &err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(*key, "switch.codex_live_route_mismatch");
+        }
+        other => panic!("expected localized route mismatch, got {other:?}"),
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read unchanged live config"),
+        corrupt_live_config,
+        "unreadable live config must not be overwritten"
+    );
+    assert!(
+        !cc_switch_lib::get_codex_auth_path().exists(),
+        "auth.json must stay absent"
+    );
+    let providers_after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after rejected switch");
+    assert_eq!(
+        providers_after["stored-provider"].settings_config, stored_before,
+        "rejected switch must not change the stored provider row"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider"),
+        Some("stored-provider".to_string()),
+        "rejected switch must not change the current provider"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_config_snippet(AppType::Codex.as_str())
+            .expect("read snippet after rejected switch")
+            .as_deref(),
+        Some(original_snippet),
+        "rejected switch must not touch the common config snippet"
+    );
+}
+
+/// 2026-08-13 hardening regression guard: a completely missing Codex live
+/// config must still allow switching (first-time setup / recovery).
+#[test]
+fn provider_service_switch_codex_allows_switch_when_no_live_config() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-provider".to_string();
+        manager.providers.insert(
+            "stored-provider".to_string(),
+            Provider::with_id(
+                "stored-provider".to_string(),
+                "Stored Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "stored-key" },
+                    "config": r#"model_provider = "stored"
+
+[model_providers.stored]
+name = "Stored"
+base_url = "https://stored.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "target-provider".to_string(),
+            Provider::with_id(
+                "target-provider".to_string(),
+                "Target Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "target-key" },
+                    "config": r#"model_provider = "target"
+
+[model_providers.target]
+name = "Target"
+base_url = "https://target.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let stored_before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers before switch")["stored-provider"]
+        .settings_config
+        .clone();
+
+    let _result = ProviderService::switch(&state, AppType::Codex, "target-provider")
+        .expect("missing live config must not block the switch");
+
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider"),
+        Some("target-provider".to_string()),
+        "switch should complete and select the target provider"
+    );
+    assert!(
+        cc_switch_lib::get_codex_config_path().exists(),
+        "live config should be written for the target provider"
+    );
+    let providers_after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after switch");
+    assert_eq!(
+        providers_after["stored-provider"].settings_config, stored_before,
+        "no live config exists, so no backfill may mutate the stored provider"
+    );
+}
+
 #[test]
 fn provider_service_switch_codex_official_clears_stale_third_party_auth() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
