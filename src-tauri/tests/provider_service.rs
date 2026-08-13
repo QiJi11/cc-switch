@@ -104,7 +104,14 @@ fn provider_service_switch_codex_updates_live_and_config() {
     let _home = ensure_test_home();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
-    let legacy_config = r#"[mcp_servers.legacy]
+    let legacy_config = r#"model_provider = "legacy"
+
+[model_providers.legacy]
+name = "Legacy"
+base_url = "https://legacy.example/v1"
+wire_api = "responses"
+
+[mcp_servers.legacy]
 type = "stdio"
 command = "echo"
 "#;
@@ -123,8 +130,8 @@ command = "echo"
                 "old-provider".to_string(),
                 "Legacy".to_string(),
                 json!({
-                    "auth": {"OPENAI_API_KEY": "stale"},
-                    "config": "stale-config"
+                    "auth": {"OPENAI_API_KEY": "legacy-key"},
+                    "config": legacy_config
                 }),
                 None,
             ),
@@ -246,6 +253,247 @@ command = "say"
     );
 }
 
+/// 2026-08-13 regression: a foreign live route must never be saved into the
+/// DB row for the provider that CC Switch merely believes is current.
+#[test]
+fn provider_service_switch_codex_rejects_foreign_live_route_without_writes() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let foreign_live_auth = json!({ "OPENAI_API_KEY": "foreign-key" });
+    let foreign_live_config = r#"model_provider = "foreign"
+model = "foreign-model"
+disable_response_storage = true
+
+[model_providers.foreign]
+name = "Foreign"
+base_url = "https://foreign.example/v1"
+wire_api = "responses"
+"#;
+    write_codex_live_atomic(&foreign_live_auth, Some(foreign_live_config))
+        .expect("seed foreign Codex live route");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-provider".to_string();
+
+        let mut stored_provider = Provider::with_id(
+            "stored-provider".to_string(),
+            "Stored Provider".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "stored-key" },
+                "config": r#"model_provider = "stored"
+model = "stored-model"
+
+[model_providers.stored]
+name = "Stored"
+base_url = "https://stored.example/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        stored_provider.meta = Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("stored-provider".to_string(), stored_provider);
+        manager.providers.insert(
+            "target-provider".to_string(),
+            Provider::with_id(
+                "target-provider".to_string(),
+                "Target Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "target-key" },
+                    "config": r#"model_provider = "target"
+model = "target-model"
+
+[model_providers.target]
+name = "Target"
+base_url = "https://target.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let original_snippet = "[tui]\nnotifications = true\n";
+    state
+        .db
+        .set_config_snippet(AppType::Codex.as_str(), Some(original_snippet.to_string()))
+        .expect("seed common config snippet");
+    let stored_before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers before switch")["stored-provider"]
+        .settings_config
+        .clone();
+
+    let err = ProviderService::switch(&state, AppType::Codex, "target-provider")
+        .expect_err("foreign live route must fail closed");
+    match &err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(*key, "switch.codex_live_route_mismatch");
+        }
+        other => panic!("expected localized route mismatch, got {other:?}"),
+    }
+    let error_text = err.to_string();
+    assert!(!error_text.contains("stored-key"));
+    assert!(!error_text.contains("foreign-key"));
+    assert!(!error_text.contains("stored.example"));
+    assert!(!error_text.contains("foreign.example"));
+
+    let providers_after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after rejected switch");
+    assert_eq!(
+        providers_after["stored-provider"].settings_config, stored_before,
+        "foreign live settings must not overwrite the stored provider"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_config_snippet(AppType::Codex.as_str())
+            .expect("read snippet after rejected switch")
+            .as_deref(),
+        Some(original_snippet),
+        "route ownership must be checked before common-config synchronization"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("stored-provider"),
+        "rejected switch must not update the current provider"
+    );
+    assert_eq!(
+        read_json_file::<serde_json::Value>(&cc_switch_lib::get_codex_auth_path())
+            .expect("read unchanged live auth"),
+        foreign_live_auth
+    );
+    assert_eq!(
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+            .expect("read unchanged live config"),
+        foreign_live_config
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_same_route_backfills_model_and_effort() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({ "OPENAI_API_KEY": "same-key" });
+    let live_config = r#"model_provider = "stored"
+model = "new-model"
+model_reasoning_effort = "xhigh"
+
+[model_providers.stored]
+name = "Stored"
+base_url = "https://stored.example/v1/"
+wire_api = "responses"
+"#;
+    write_codex_live_atomic(&live_auth, Some(live_config))
+        .expect("seed same-route Codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-provider".to_string();
+        manager.providers.insert(
+            "stored-provider".to_string(),
+            Provider::with_id(
+                "stored-provider".to_string(),
+                "Stored Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "same-key" },
+                    "config": r#"model_provider = "stored"
+model = "old-model"
+model_reasoning_effort = "high"
+
+[model_providers.stored]
+name = "Stored"
+base_url = "https://stored.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "target-provider".to_string(),
+            Provider::with_id(
+                "target-provider".to_string(),
+                "Target Provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "target-key" },
+                    "config": r#"model_provider = "target"
+model = "target-model"
+
+[model_providers.target]
+name = "Target"
+base_url = "https://target.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    ProviderService::switch(&state, AppType::Codex, "target-provider")
+        .expect("same route should allow backfill");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after switch");
+    let stored_provider = providers
+        .get("stored-provider")
+        .expect("stored provider exists");
+    let stored_config: toml::Value = toml::from_str(
+        stored_provider
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str())
+            .expect("stored config text"),
+    )
+    .expect("parse backfilled config");
+    assert_eq!(
+        stored_config.get("model").and_then(|value| value.as_str()),
+        Some("new-model")
+    );
+    assert_eq!(
+        stored_config
+            .get("model_reasoning_effort")
+            .and_then(|value| value.as_str()),
+        Some("xhigh")
+    );
+    assert_eq!(
+        stored_provider
+            .settings_config
+            .pointer("/auth/OPENAI_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("same-key")
+    );
+}
+
 #[test]
 fn provider_service_switch_codex_preserves_user_model_provider_id_after_migration() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -253,7 +501,7 @@ fn provider_service_switch_codex_preserves_user_model_provider_id_after_migratio
     let _home = ensure_test_home();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "rightcode-key" });
-    let legacy_config = r#"model_provider = "rightcode"
+    let legacy_provider_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
 
 [model_providers.rightcode]
@@ -262,7 +510,17 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+    let legacy_live_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "rightcode-key"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(legacy_live_config))
         .expect("seed existing codex live config");
 
     let mut initial_config = MultiAppConfig::default();
@@ -277,8 +535,8 @@ requires_openai_auth = true
                 "old-provider".to_string(),
                 "RightCode".to_string(),
                 json!({
-                    "auth": {"OPENAI_API_KEY": "stale"},
-                    "config": legacy_config
+                    "auth": {"OPENAI_API_KEY": "rightcode-key"},
+                    "config": legacy_provider_config
                 }),
                 None,
             ),
@@ -377,6 +635,7 @@ name = "RightCode"
 base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+experimental_bearer_token = "rightcode-key"
 "#;
     write_codex_live_atomic(&live_auth, Some(legacy_config))
         .expect("seed existing Codex OAuth live config");
@@ -733,6 +992,7 @@ name = "RightCode"
 base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+experimental_bearer_token = "rightcode-key"
 "#;
     write_codex_live_atomic(&live_auth, Some(legacy_config))
         .expect("seed existing Codex OAuth live config");
@@ -792,6 +1052,120 @@ requires_openai_auth = true
     assert!(
         live_config.contains("experimental_bearer_token = \"third-party-key\""),
         "the third-party key must be injected as the provider-scoped bearer token; got:\n{live_config}"
+    );
+}
+
+/// 2026-08-13 regression: an API-key provider cannot claim a live route merely
+/// because its endpoint matches when live authentication is still ChatGPT OAuth.
+#[test]
+fn provider_service_switch_codex_rejects_same_url_without_matching_api_key() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-1"
+        }
+    });
+    let legacy_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(legacy_config))
+        .expect("seed existing Codex OAuth live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "legacy-provider".to_string();
+        manager.providers.insert(
+            "legacy-provider".to_string(),
+            Provider::with_id(
+                "legacy-provider".to_string(),
+                "RightCode".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "rightcode-key"},
+                    "config": legacy_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "third-party".to_string(),
+            Provider::with_id(
+                "third-party".to_string(),
+                "AiHubMix".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "third-party-key"},
+                    "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let stored_before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers before rejected switch")["legacy-provider"]
+        .settings_config
+        .clone();
+
+    let err = ProviderService::switch(&state, AppType::Codex, "third-party")
+        .expect_err("missing live API key must reject the switch");
+    match &err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(*key, "switch.codex_live_route_mismatch");
+        }
+        other => panic!("expected localized route mismatch, got {other:?}"),
+    }
+
+    let auth_value: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth_value, live_auth,
+        "rejected switch must not overwrite live OAuth auth.json"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+            .expect("read unchanged live config"),
+        legacy_config
+    );
+    let providers_after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after rejected switch");
+    assert_eq!(
+        providers_after["legacy-provider"].settings_config, stored_before,
+        "missing live key must not overwrite the current provider row"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider"),
+        Some("legacy-provider".to_string()),
+        "rejected switch must not change the selected provider"
     );
 }
 
@@ -1228,8 +1602,10 @@ http_headers = { Authorization = "Bearer explicit-header-token" }
     );
 }
 
+/// 2026-08-13 regression: a live official OAuth route cannot be backfilled
+/// into a DB row for a custom provider before switching to material-less official.
 #[test]
-fn provider_service_switch_codex_supports_official_login_provider_without_auth_write() {
+fn provider_service_switch_codex_rejects_official_live_for_current_custom_provider() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1278,41 +1654,57 @@ requires_openai_auth = true
             }),
             None,
         );
+        official_provider.category = Some("official".to_string());
         manager
             .providers
             .insert("codex-official".to_string(), official_provider);
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let legacy_before = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers before rejected switch")["legacy-provider"]
+        .settings_config
+        .clone();
 
-    ProviderService::switch(&state, AppType::Codex, "codex-official")
-        .expect("switch to official provider should succeed without API key");
+    let err = ProviderService::switch(&state, AppType::Codex, "codex-official")
+        .expect_err("foreign official OAuth route must reject the switch");
+    match &err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(*key, "switch.codex_live_route_mismatch");
+        }
+        other => panic!("expected localized route mismatch, got {other:?}"),
+    }
 
     let auth_value: serde_json::Value =
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
-        auth_value.get("auth_mode").and_then(|v| v.as_str()),
-        Some("chatgpt")
-    );
-    assert!(
-        auth_value
-            .get("OPENAI_API_KEY")
-            .is_some_and(|v| v.is_null()),
-        "official provider switching should keep OPENAI_API_KEY null"
-    );
-    assert_eq!(
-        auth_value
-            .pointer("/tokens/access_token")
-            .and_then(|v| v.as_str()),
-        Some("official-oauth-token"),
-        "official provider should preserve the existing ChatGPT OAuth token"
+        auth_value, live_auth,
+        "rejected switch must not replace live official OAuth auth"
     );
 
     let live_config =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        !live_config.contains("experimental_bearer_token"),
-        "official login provider has no API key to inject"
+        live_config.is_empty(),
+        "rejected switch must not write the target provider config"
+    );
+    let providers_after = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after rejected switch");
+    assert_eq!(
+        providers_after["legacy-provider"].settings_config, legacy_before,
+        "rejected switch must not backfill the official OAuth route into custom storage"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider"),
+        Some("legacy-provider".to_string()),
+        "rejected switch must not change the current provider"
     );
 }
 
@@ -1334,8 +1726,6 @@ base_url = "https://aihubmix.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    // Live key intentionally differs from the DB row so the assertion below
-    // proves the backfill preserved the live copy before it was deleted.
     let live_auth = json!({ "OPENAI_API_KEY": "stale-live-key" });
     write_codex_live_atomic(&live_auth, Some(third_party_config))
         .expect("seed third-party live config");
@@ -1352,7 +1742,7 @@ requires_openai_auth = true
                 "third-party".to_string(),
                 "AiHubMix".to_string(),
                 json!({
-                    "auth": {"OPENAI_API_KEY": "old-db-key"},
+                    "auth": {"OPENAI_API_KEY": "stale-live-key"},
                     "config": third_party_config
                 }),
                 None,

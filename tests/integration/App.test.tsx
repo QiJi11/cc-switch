@@ -186,6 +186,8 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
+const { default: App } = await import("@/App");
+
 const renderApp = (AppComponent: ComponentType) => {
   const client = new QueryClient();
   return render(
@@ -209,7 +211,6 @@ describe("App integration with MSW", () => {
   });
 
   it("covers basic provider flows via real hooks", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -266,7 +267,6 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -326,7 +326,6 @@ describe("App integration with MSW", () => {
     setCurrentProviderId("openclaw", "deepseek");
     setLiveProviderIds("openclaw", ["deepseek-copy"]);
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(screen.getByText("switch-openclaw"));
@@ -417,7 +416,6 @@ describe("App integration with MSW", () => {
       .spyOn(providersApi, "getOpenClawLiveProviderIds")
       .mockRejectedValueOnce(new Error("broken config"));
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(screen.getByText("switch-openclaw"));
@@ -445,7 +443,6 @@ describe("App integration with MSW", () => {
 
   it("hosts the Skills check-update action in the App toolbar", async () => {
     localStorage.setItem("cc-switch-last-view", "skills");
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     expect(
@@ -462,7 +459,6 @@ describe("App integration with MSW", () => {
 
   it("routes the Skills discover toolbar action through the panel guard", async () => {
     localStorage.setItem("cc-switch-last-view", "skills");
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     expect(

@@ -5217,6 +5217,23 @@ impl ProviderService {
                     // Only backfill when switching to a different provider
                     if let Ok(live_config) = read_live_settings(app_type.clone()) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
+                            if matches!(app_type, AppType::Codex)
+                                && !live::codex_live_route_matches_provider(
+                                    &current_provider,
+                                    &live_config,
+                                )
+                            {
+                                log::warn!(
+                                    "Refusing Codex provider switch because live route ownership could not be confirmed for current provider '{}'",
+                                    current_provider.id
+                                );
+                                return Err(AppError::localized(
+                                    "switch.codex_live_route_mismatch",
+                                    "Codex Live 配置与当前供应商不一致。为避免覆盖错误配置，本次切换已取消；请先重新应用当前供应商或修复 Live 配置。",
+                                    "Codex live configuration does not match the current provider. The switch was cancelled to avoid overwriting the wrong provider; reapply the current provider or repair the live configuration first.",
+                                ));
+                            }
+
                             // 切走前先把 live 里的可共享改动（含用户直接在应用内
                             // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
                             // 详见 sync_common_config_snippet_from_live 的文档。
